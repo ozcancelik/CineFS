@@ -1,0 +1,46 @@
+name: CI & Release Builds (macOS + Windows)
+
+on:
+  push:
+    branches: [ main, master ]
+    tags: [ 'v*' ]
+  pull_request:
+
+jobs:
+  test-and-build-macos:
+    name: macOS (CineFS.app & CineFS.dmg)
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Run Rust unit tests
+        run: cargo test --workspace
+      - name: Build macOS App Bundle & DMG
+        run: ./macos/build_app.sh
+      - name: Upload macOS DMG artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: CineFS-macOS-DMG
+          path: |
+            macos/build/CineFS.dmg
+            target/release/cinefs-cli
+
+  test-and-build-windows:
+    name: Windows (CineFS.exe & CineFS-Setup.exe)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Run Rust unit tests on Windows
+        run: cargo test --workspace
+      - name: Build Windows GUI, CLI, and Inno Setup Installer
+        shell: pwsh
+        run: ./windows/build_windows.ps1
+      - name: Upload Windows Installer & Binaries
+        uses: actions/upload-artifact@v4
+        with:
+          name: CineFS-Windows-Setup
+          path: |
+            windows/build/CineFS-Setup.exe
+            windows/build/CineFS.exe
+            windows/build/cinefs-cli.exe

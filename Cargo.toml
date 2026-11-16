@@ -1,0 +1,20 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/cinefs-core",
+    "crates/cinefs-cli",
+    "crates/cinefs-win",
+    "crates/cinefs-player",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/ozcancelik/CineFS"
+authors = ["Özcan Çelik"]
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1

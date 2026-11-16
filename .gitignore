@@ -1,0 +1,102 @@
+# ---------------------------------------------------------------------------
+# Rust
+# ---------------------------------------------------------------------------
+/target/
+**/*.rs.bk
+*.pdb
+# Cargo.lock is intentionally committed (this workspace ships binaries).
+
+# ---------------------------------------------------------------------------
+# Build outputs & release artifacts (produced by build scripts / CI)
+# ---------------------------------------------------------------------------
+/macos/build/
+/windows/build/
+*.dmg
+*.app/
+*.exe
+*.msi
+*.zip
+
+# Third-party downloads fetched by windows/build_windows.ps1 (WinFsp runtime MSI)
+/windows/deps/
+
+# ---------------------------------------------------------------------------
+# Media: sample clips and generated output never belong in the repo
+# (large, and may be copyrighted / personal footage)
+# ---------------------------------------------------------------------------
+*.MLV
+*.mlv
+*.M[0-9][0-9]
+*.m[0-9][0-9]
+*.IDX
+*.idx
+*.mcraw
+*.MCRAW
+*.braw
+*.BRAW
+*.dng
+*.DNG
+*.wav
+*.WAV
+*.mov
+*.MOV
+*.mp4
+*.MP4
+*.tif
+*.tiff
+*.exr
+test_out/
+bench_out/
+mlv-samples/
+samples/
+
+# ---------------------------------------------------------------------------
+# Logs, crash dumps, profiling
+# ---------------------------------------------------------------------------
+*.log
+*.dmp
+*.trace
+perf.data*
+flamegraph*.svg
+
+# ---------------------------------------------------------------------------
+# Local settings / secrets
+# ---------------------------------------------------------------------------
+.env
+.env.*
+settings.ini
+*.p12
+*.pem
+*.key
+*.mobileprovision
+
+# ---------------------------------------------------------------------------
+# OS junk
+# ---------------------------------------------------------------------------
+.DS_Store
+._*
+.Spotlight-V100
+.Trashes
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+
+# ---------------------------------------------------------------------------
+# Editors / IDEs / tools
+# ---------------------------------------------------------------------------
+.vscode/
+.idea/
+*.iml
+*.swp
+*.swo
+*~
+.fleet/
+.zed/
+xcuserdata/
+*.xcuserstate
+DerivedData/
+.swiftpm/
+.build/
+.claude/
+CLAUDE.local.md

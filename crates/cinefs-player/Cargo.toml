@@ -1,0 +1,19 @@
+[package]
+name = "cinefs-player"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "GPU (wgpu) RAW player for CineFS: parallel frame decode, Bayer upload, GPU debayer + colour"
+
+[lib]
+crate-type = ["rlib", "staticlib"]
+
+[dependencies]
+cinefs-core = { path = "../cinefs-core" }
+wgpu = "30.0.1"
+pollster = "0.4"
+bytemuck = { version = "1", features = ["derive"] }
+raw-window-handle = "0.6"
+cpal = "0.18.2"

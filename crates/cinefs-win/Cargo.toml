@@ -1,0 +1,18 @@
+[package]
+name = "cinefs-win"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Native Windows desktop and system tray application for CineFS (WinFsp + DaVinci Resolve integration)"
+
+[[bin]]
+name = "cinefs-win"
+path = "src/main.rs"
+
+[dependencies]
+cinefs-core = { path = "../cinefs-core" }
+
+[target.'cfg(windows)'.dependencies]
+cinefs-player = { path = "../cinefs-player" }
