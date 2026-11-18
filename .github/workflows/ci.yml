@@ -6,9 +6,29 @@ on:
     tags: [ 'v*' ]
   pull_request:
 
+# Read-only by default; only the release job below gets write access.
+permissions:
+  contents: read
+
 jobs:
+  # Cheap Linux check that runs first: the version must be the same in Cargo.toml,
+  # Info.plist and CineFS.iss, and on a tag push it must also match the tag (v1.2.3 -> 1.2.3).
+  version-check:
+    name: Version check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check version consistency
+        run: |
+          if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
+            bash scripts/check_version.sh "${GITHUB_REF_NAME}"
+          else
+            bash scripts/check_version.sh
+          fi
+
   test-and-build-macos:
     name: macOS (CineFS.app & CineFS.dmg)
+    needs: version-check
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
@@ -21,12 +41,14 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: CineFS-macOS-DMG
+          if-no-files-found: error
           path: |
             macos/build/CineFS.dmg
             target/release/cinefs-cli
 
   test-and-build-windows:
     name: Windows (CineFS.exe & CineFS-Setup.exe)
+    needs: version-check
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
@@ -51,7 +73,37 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: CineFS-Windows-Setup
+          if-no-files-found: error
           path: |
             windows/build/CineFS-Setup.exe
             windows/build/CineFS.exe
             windows/build/cinefs-cli.exe
+
+  # Only on a version tag (v*), after both platforms built and tested: create a DRAFT
+  # GitHub Release with the DMG and the Windows installer attached. Nothing is public
+  # until you open the draft on GitHub, edit the notes and press "Publish release".
+  # File names stay fixed, so releases/latest/download/CineFS.dmg always points at the newest one.
+  release:
+    name: Draft GitHub Release
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [test-and-build-macos, test-and-build-windows]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+      - name: List downloaded files
+        run: find dist -type f | sort
+      - name: Create draft release
+        uses: softprops/action-gh-release@v2
+        with:
+          draft: true
+          name: CineFS ${{ github.ref_name }}
+          generate_release_notes: true
+          fail_on_unmatched_files: true
+          files: |
+            dist/CineFS-macOS-DMG/**/CineFS.dmg
+            dist/CineFS-Windows-Setup/**/CineFS-Setup.exe
