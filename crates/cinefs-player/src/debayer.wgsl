@@ -70,23 +70,23 @@ fn fs_debayer(in: VsOut) -> @location(0) vec4<f32> {
     let u2 = tap(x, y - 2);
     let d2 = tap(x, y + 2);
 
-    var rgb = vec3<f32>(0.0);
+    // Build `rgb` with select() instead of dynamically indexed writes (`rgb[i] = ...`):
+    // D3D12's FXC compiler rejects those ("array reference cannot be used as an l-value").
+    var rgb: vec3<f32>;
     if (c0 != 1u) {
         // R or B site: green by the cross kernel, the opposite chroma by the diagonal kernel.
         let g = (4.0 * c + 2.0 * (l1 + r1 + u1 + d1) - (l2 + r2 + u2 + d2)) / 8.0;
         let diag = tap(x - 1, y - 1) + tap(x + 1, y - 1) + tap(x - 1, y + 1) + tap(x + 1, y + 1);
         let o = (6.0 * c + 2.0 * diag - 1.5 * (l2 + r2 + u2 + d2)) / 8.0;
-        rgb[c0] = c;
-        rgb[1u] = g;
-        rgb[2u - c0] = o;
+        // Red site -> (c, g, o); blue site -> (o, g, c).
+        rgb = select(vec3<f32>(o, g, c), vec3<f32>(c, g, o), c0 == 0u);
     } else {
         // Green site: chroma in the same row (horizontal) and in the same column (vertical).
         let dg = tap(x - 1, y - 1) + tap(x + 1, y - 1) + tap(x - 1, y + 1) + tap(x + 1, y + 1);
         let hch = (5.0 * c - dg - l2 - r2 + 0.5 * (u2 + d2) + 4.0 * (l1 + r1)) / 8.0;
         let vch = (5.0 * c - dg - u2 - d2 + 0.5 * (l2 + r2) + 4.0 * (u1 + d1)) / 8.0;
-        rgb[1u] = c;
-        rgb[cfa_at(x + 1, y)] = hch;
-        rgb[cfa_at(x, y + 1)] = vch;
+        // Red neighbour in this row -> (hch, c, vch); blue neighbour in this row -> (vch, c, hch).
+        rgb = select(vec3<f32>(vch, c, hch), vec3<f32>(hch, c, vch), cfa_at(x + 1, y) == 0u);
     }
 
     var cam = max((rgb - vec3<f32>(p.black)) * p.inv_range, vec3<f32>(0.0)) * p.wb.xyz;
