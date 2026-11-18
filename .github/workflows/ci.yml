@@ -31,6 +31,17 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+      # cinefs-win embeds windows/deps/winfsp.msi via include_bytes!, so it must exist
+      # before anything compiles. The file is gitignored (third-party binary).
+      - name: Download WinFsp 2.0 runtime MSI
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path windows/deps | Out-Null
+          Invoke-WebRequest -Uri "https://github.com/winfsp/winfsp/releases/download/v2.0/winfsp-2.0.23075.msi" -OutFile windows/deps/winfsp.msi
+          $hash = (Get-FileHash windows/deps/winfsp.msi -Algorithm SHA256).Hash
+          if ($hash -ne "6324DC81194A6A08F97B6AECA303CF5C2325C53EDE153BAE9FC4378F0838C101") {
+            throw "winfsp.msi SHA256 mismatch: $hash"
+          }
       - name: Run Rust unit tests on Windows
         run: cargo test --workspace
       - name: Build Windows GUI, CLI, and Inno Setup Installer
