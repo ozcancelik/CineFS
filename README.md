@@ -11,8 +11,9 @@ No conversion step and no extra disk space: the CinemaDNG frames are generated o
 your editing software reads them. Your original clips are never modified (the only files CineFS
 writes are Adobe `.xmp` sidecars, next to the clip, when you change settings in Camera Raw).
 
-> **Status:** early release (v0.x). Magic Lantern `.MLV` and MotionCam `.mcraw` are the main
-> formats; Blackmagic RAW `.braw` support is experimental. Bug reports with a sample clip are very welcome.
+> **Status:** early release (v0.x). Bug reports are very welcome: please
+> [open an issue](https://github.com/ozcancelik/CineFS/issues) and, if you can, include a link to a
+> short sample clip.
 
 ## Download & install
 
@@ -39,6 +40,17 @@ mounts through the NFS client that is built into macOS.
 3. Import those folders into DaVinci Resolve, Premiere Pro or After Effects like any CinemaDNG footage.
 4. Keep CineFS running while you edit; unmount from CineFS when you are done.
 
+## Known limitations
+
+- **Magic Lantern `.MLV`:** there is no dual ISO processing, vertical stripe correction or
+  bad/hot pixel correction yet.
+- **Focus pixel correction** is only applied to Canon bodies with phase-detect pixels in raw
+  video (100D, 650D, 700D, EOS M). The pixel positions are learned from the clip itself, so very
+  short or heavily textured clips may leave a few focus pixels uncorrected.
+- **Blackmagic RAW `.braw` is experimental.** Black/white levels are approximated, white balance
+  is estimated from the first frame (the camera's Kelvin/tint is not used) and the sensor is
+  assumed to be Blackmagic Wide Gamut Gen4/5, so colour may not match Blackmagic's own software.
+
 ## Background
 
 CineFS is inspired by [MLVFS](https://github.com/davidmilligan/MLVFS), which first showed how good it is
@@ -54,7 +66,7 @@ import, and support for MotionCam `.mcraw` and (experimentally) Blackmagic RAW `
 - **Zero-Decode LJ92 Passthrough**: Lossless JPEG (LJ92) frames in `.MLV` containers that match DNG's 2-component CFA predictor-1 layout are wrapped directly as `Compression = 7` DNG strips without decoding or re-encoding pixels.
 - **Zero-Unpack Native Bit Depth**: Uncompressed 8/10/12/14/16-bit `.MLV` frames are served at their native bit depth without inflating to 16-bit.
 - **Native MotionCam `.mcraw` Support**: Pure-Rust MotionCam container v3 parser and block-level bitplane decoder (`compressionType = 7` and legacy `6`), mapping dual-illuminant `ColorMatrix1/2`, `ForwardMatrix1/2`, `AsShotNeutral`, dynamic black/white levels, and audio packets directly into virtual CinemaDNG + BWF WAV.
-- **Experimental Blackmagic RAW `.braw` Support**: Independent, pure-Rust reader for `.braw` clips that decodes frames to 12-bit Bayer and serves them as virtual CinemaDNG. Black/white levels and white balance are approximated, so colour may not match Blackmagic's own software. See [Trademarks & affiliation](#trademarks--affiliation).
+- **Experimental Blackmagic RAW `.braw` Support**: Independent, pure-Rust reader for `.braw` clips that decodes frames to 12-bit Bayer and serves them as virtual CinemaDNG (see [Known limitations](#known-limitations)). See [Trademarks & affiliation](#trademarks--affiliation).
 - **Broadcast WAV (BWF) Audio**: `WAVI` + `AUDF` (and `.mcraw` `AUDIO_DATA`) blocks are presented as a virtual `.wav` file with embedded `bext` and `iXML` timecode chunks so DaVinci Resolve automatically syncs audio to the CinemaDNG sequence.
 - **Zero-Extension macOS Mount**: Built-in user-space NFSv3 + MOUNTv3 server (`crates/cinefs-core/src/nfs.rs`) mounts virtual CinemaDNG volumes natively via `/sbin/mount_nfs` — no `macFUSE`, no kernel extensions (`kext`), no recovery mode, and no `sudo` required.
 - **Zero-Dependency Windows WinFsp Adapter**: Built-in WinFsp C ABI dispatcher (`crates/cinefs-core/src/winfsp.rs`) dynamically loads `winfsp-x64.dll` / `winfsp-a64.dll` at runtime and mounts virtual CinemaDNG volumes to drive letters (`Z:`, `Y:`) or folders.
