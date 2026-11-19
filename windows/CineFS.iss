@@ -1,4 +1,4 @@
-; CineFS Windows Installer Script (Inno Setup 6)
+﻿; CineFS Windows Installer Script (Inno Setup 6)
 ; Builds a single-click CineFS-Setup.exe that:
 ; 1. Installs CineFS.exe (GUI + System Tray) and cinefs-cli.exe
 ; 2. Silently installs the bundled WinFsp runtime MSI if not already present
@@ -7,7 +7,7 @@
 
 #define MyAppName "CineFS"
 #define MyAppVersion "0.1.0"
-#define MyAppPublisher "Ãzcan Ãelik"
+#define MyAppPublisher "Özcan Çelik"
 #define MyAppURL "https://github.com/ozcancelik/CineFS"
 #define MyAppExeName "CineFS.exe"
 

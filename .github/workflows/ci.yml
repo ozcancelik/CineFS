@@ -1,18 +1,29 @@
 name: CI & Release Builds (macOS + Windows)
 
+# Every push / PR runs only the cheap Linux jobs (tests + a Windows compile check).
+# The expensive macOS and Windows builds run only when they are needed:
+#   - on a version tag (v*), which also drafts the GitHub Release, or
+#   - by hand: Actions tab -> this workflow -> "Run workflow".
 on:
   push:
     branches: [ main, master ]
     tags: [ 'v*' ]
   pull_request:
+  workflow_dispatch:
+
+# A newer push to the same branch cancels the run still going for the older one.
+# Tag runs are never cancelled.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/') }}
 
 # Read-only by default; only the release job below gets write access.
 permissions:
   contents: read
 
 jobs:
-  # Cheap Linux check that runs first: the version must be the same in Cargo.toml,
-  # Info.plist and CineFS.iss, and on a tag push it must also match the tag (v1.2.3 -> 1.2.3).
+  # The version must be the same in Cargo.toml, Info.plist and CineFS.iss,
+  # and on a tag push it must also match the tag (v1.2.3 -> 1.2.3).
   version-check:
     name: Version check
     runs-on: ubuntu-latest
@@ -26,17 +37,101 @@ jobs:
             bash scripts/check_version.sh
           fi
 
+  # Runs on every push. Linux minutes count 1x (macOS 10x, Windows 2x).
+  # GPU tests skip themselves here (no GPU adapter); the real GPU checks run in the
+  # macOS / Windows builds below.
+  test-linux:
+    name: Tests (Linux)
+    needs: version-check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Install system libraries (ALSA for cpal)
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libasound2-dev pkg-config
+      - name: Run Rust unit tests
+        run: cargo test --workspace
+
+  # Runs on every push: compiles the Windows-only code (WinFsp adapter, Windows app)
+  # from Linux without running it, so Windows breakage shows up without a Windows runner.
+  check-windows:
+    name: Windows compile check (from Linux)
+    needs: version-check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+      - uses: Swatinem/rust-cache@v2
+      # cinefs-win embeds windows/deps/winfsp.msi via include_bytes!, so it must exist to compile.
+      - name: Download WinFsp 2.0 runtime MSI
+        run: |
+          mkdir -p windows/deps
+          curl -fsSL -o windows/deps/winfsp.msi "https://github.com/winfsp/winfsp/releases/download/v2.0/winfsp-2.0.23075.msi"
+          echo "6324dc81194a6a08f97b6aeca303cf5c2325c53ede153bae9fc4378f0838c101  windows/deps/winfsp.msi" | sha256sum -c -
+      - name: cargo check for Windows
+        run: cargo check --workspace --all-targets --target x86_64-pc-windows-msvc
+
   test-and-build-macos:
     name: macOS (CineFS.app & CineFS.dmg)
-    needs: version-check
+    if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
+    needs: [test-linux, check-windows]
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - name: Run Rust unit tests
         run: cargo test --workspace
-      - name: Build macOS App Bundle & DMG
+      # Developer ID signing + notarization. Needs these repository secrets
+      # (Settings -> Secrets and variables -> Actions):
+      #   MACOS_CERT_P12_BASE64   "Developer ID Application" certificate + key, .p12, base64
+      #   MACOS_CERT_PASSWORD     password chosen when exporting the .p12
+      #   APPLE_API_KEY_P8_BASE64 App Store Connect API key (.p8), base64
+      #   APPLE_API_KEY_ID        its Key ID
+      #   APPLE_API_ISSUER_ID     its Issuer ID
+      # Without the certificate secrets the build still works, with an ad-hoc signature.
+      - name: Import Developer ID certificate into a temporary keychain
+        env:
+          MACOS_CERT_P12_BASE64: ${{ secrets.MACOS_CERT_P12_BASE64 }}
+          MACOS_CERT_PASSWORD: ${{ secrets.MACOS_CERT_PASSWORD }}
+          APPLE_API_KEY_P8_BASE64: ${{ secrets.APPLE_API_KEY_P8_BASE64 }}
+        run: |
+          if [[ -z "${MACOS_CERT_P12_BASE64}" ]]; then
+            echo "::warning::MACOS_CERT_P12_BASE64 not set: building with an ad-hoc signature (not distributable)."
+            exit 0
+          fi
+          KEYCHAIN="${RUNNER_TEMP}/signing.keychain-db"
+          KEYCHAIN_PASSWORD="$(openssl rand -base64 24)"
+          echo "${MACOS_CERT_P12_BASE64}" | base64 --decode > "${RUNNER_TEMP}/cert.p12"
+          security create-keychain -p "${KEYCHAIN_PASSWORD}" "${KEYCHAIN}"
+          security set-keychain-settings -lut 21600 "${KEYCHAIN}"
+          security unlock-keychain -p "${KEYCHAIN_PASSWORD}" "${KEYCHAIN}"
+          security import "${RUNNER_TEMP}/cert.p12" -P "${MACOS_CERT_PASSWORD}" -A -t cert -f pkcs12 -k "${KEYCHAIN}"
+          security set-key-partition-list -S apple-tool:,apple: -s -k "${KEYCHAIN_PASSWORD}" "${KEYCHAIN}" > /dev/null
+          security list-keychains -d user -s "${KEYCHAIN}" $(security list-keychains -d user | tr -d '"')
+          rm -f "${RUNNER_TEMP}/cert.p12"
+          IDENTITY="$(security find-identity -v -p codesigning "${KEYCHAIN}" | grep 'Developer ID Application' | head -n1 | awk '{print $2}')"
+          if [[ -z "${IDENTITY}" ]]; then
+            echo "::error::No 'Developer ID Application' identity found in the imported certificate."
+            exit 1
+          fi
+          echo "CODESIGN_IDENTITY=${IDENTITY}" >> "${GITHUB_ENV}"
+          if [[ -n "${APPLE_API_KEY_P8_BASE64}" ]]; then
+            echo "${APPLE_API_KEY_P8_BASE64}" | base64 --decode > "${RUNNER_TEMP}/notary_key.p8"
+            echo "NOTARY_KEY_PATH=${RUNNER_TEMP}/notary_key.p8" >> "${GITHUB_ENV}"
+          fi
+      - name: Build, sign & notarize macOS App Bundle & DMG
+        env:
+          NOTARY_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+          NOTARY_ISSUER_ID: ${{ secrets.APPLE_API_ISSUER_ID }}
         run: ./macos/build_app.sh
+      - name: Remove signing material
+        if: always()
+        run: |
+          security delete-keychain "${RUNNER_TEMP}/signing.keychain-db" 2>/dev/null || true
+          rm -f "${RUNNER_TEMP}/notary_key.p8"
       - name: Upload macOS DMG artifact
         uses: actions/upload-artifact@v4
         with:
@@ -48,7 +143,8 @@ jobs:
 
   test-and-build-windows:
     name: Windows (CineFS.exe & CineFS-Setup.exe)
-    needs: version-check
+    if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
+    needs: [test-linux, check-windows]
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
