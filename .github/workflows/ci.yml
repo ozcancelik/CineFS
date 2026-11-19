@@ -28,7 +28,7 @@ jobs:
     name: Version check
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Check version consistency
         run: |
           if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
@@ -45,7 +45,7 @@ jobs:
     needs: version-check
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: Install system libraries (ALSA for cpal)
@@ -60,7 +60,7 @@ jobs:
     needs: version-check
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: x86_64-pc-windows-msvc
@@ -80,7 +80,7 @@ jobs:
     needs: [test-linux, check-windows]
     runs-on: macos-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: aarch64-apple-darwin, x86_64-apple-darwin   # universal (Apple Silicon + Intel) app
@@ -135,7 +135,7 @@ jobs:
           security delete-keychain "${RUNNER_TEMP}/signing.keychain-db" 2>/dev/null || true
           rm -f "${RUNNER_TEMP}/notary_key.p8"
       - name: Upload macOS DMG artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: CineFS-macOS-DMG
           if-no-files-found: error
@@ -149,7 +149,7 @@ jobs:
     needs: [test-linux, check-windows]
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       # cinefs-win embeds windows/deps/winfsp.msi via include_bytes!, so it must exist
       # before anything compiles. The file is gitignored (third-party binary).
@@ -183,7 +183,7 @@ jobs:
           CINEFS_REQUIRE_INNO: "1"   # fail instead of falling back to the built-in setup wizard
         run: ./windows/build_windows.ps1
       - name: Upload Windows Installer & Binaries
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: CineFS-Windows-Setup
           if-no-files-found: error
@@ -205,7 +205,7 @@ jobs:
       contents: write
     steps:
       - name: Download build artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           path: dist
       - name: List downloaded files
@@ -222,7 +222,7 @@ jobs:
           cp "$(find dist/CineFS-Windows-Setup -name CineFS.exe | head -n1)"       release/CineFS-Portable.exe
           ls -l release
       - name: Create draft release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           draft: true
           name: CineFS ${{ github.ref_name }}
