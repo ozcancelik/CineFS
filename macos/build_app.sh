@@ -5,37 +5,70 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 APP_NAME="CineFS"
 BUILD_DIR="${ROOT_DIR}/macos/build"
 APP_BUNDLE="${BUILD_DIR}/${APP_NAME}.app"
+ARCH_DIR="${BUILD_DIR}/arch"
 
-echo "==> [1/4] Building Rust core + GPU player (libcinefs_player.a) and CLI (cinefs-cli) in release mode..."
+# Oldest macOS the app runs on. Must match LSMinimumSystemVersion in Info.plist.
+# Without an explicit target, swiftc uses the build machine's own macOS version as the
+# minimum, and the app then refuses to launch on anything older.
+MIN_MACOS="13.0"
+export MACOSX_DEPLOYMENT_TARGET="${MIN_MACOS}"   # same minimum for the Rust code
+
+# Universal binary by default: Apple Silicon + Intel. For a quicker local build of one
+# architecture only:  MACOS_ARCHS=arm64 ./macos/build_app.sh
+MACOS_ARCHS="${MACOS_ARCHS:-arm64 x86_64}"
+
+rust_triple() {
+    case "$1" in
+        arm64)  echo "aarch64-apple-darwin" ;;
+        x86_64) echo "x86_64-apple-darwin" ;;
+        *) echo "unsupported architecture: $1" >&2; exit 1 ;;
+    esac
+}
+
 cd "${ROOT_DIR}"
-cargo build --release
+rm -rf "${APP_BUNDLE}" "${ARCH_DIR}"
+mkdir -p "${APP_BUNDLE}/Contents/MacOS" "${APP_BUNDLE}/Contents/Resources" "${ARCH_DIR}"
 
-echo "==> [2/4] Assembling ${APP_NAME}.app bundle structure..."
-rm -rf "${APP_BUNDLE}"
-mkdir -p "${APP_BUNDLE}/Contents/MacOS"
-mkdir -p "${APP_BUNDLE}/Contents/Resources"
+APP_SLICES=()
+CLI_SLICES=()
+for ARCH in ${MACOS_ARCHS}; do
+    TRIPLE="$(rust_triple "${ARCH}")"
 
+    echo "==> [1/4] (${ARCH}) Building Rust GPU player (libcinefs_player.a) and CLI (cinefs-cli)..."
+    cargo build --release --target "${TRIPLE}" -p cinefs-player -p cinefs-cli
+
+    echo "==> [2/4] (${ARCH}) Compiling SwiftUI macOS app and linking libcinefs_player.a..."
+    xcrun swiftc \
+        -O \
+        -parse-as-library \
+        -target "${ARCH}-apple-macos${MIN_MACOS}" \
+        -import-objc-header "${ROOT_DIR}/macos/CineFS/cinefs_ffi.h" \
+        "${ROOT_DIR}/macos/CineFS/CineFSApp.swift" \
+        "${ROOT_DIR}/target/${TRIPLE}/release/libcinefs_player.a" \
+        -framework AppKit \
+        -framework Metal \
+        -framework QuartzCore \
+        -framework CoreGraphics \
+        -framework IOKit \
+        -framework CoreAudio \
+        -framework AudioToolbox \
+        -framework SwiftUI \
+        -framework UniformTypeIdentifiers \
+        -o "${ARCH_DIR}/${APP_NAME}-${ARCH}"
+
+    APP_SLICES+=("${ARCH_DIR}/${APP_NAME}-${ARCH}")
+    CLI_SLICES+=("${ROOT_DIR}/target/${TRIPLE}/release/cinefs-cli")
+done
+
+echo "==> [3/4] Assembling ${APP_NAME}.app bundle (${MACOS_ARCHS})..."
 cp "${ROOT_DIR}/macos/CineFS/Info.plist" "${APP_BUNDLE}/Contents/Info.plist"
 cp "${ROOT_DIR}/macos/CineFS/AppIcon.icns" "${APP_BUNDLE}/Contents/Resources/AppIcon.icns"
-cp "${ROOT_DIR}/target/release/cinefs-cli" "${APP_BUNDLE}/Contents/MacOS/cinefs-cli"
-
-echo "==> [3/4] Compiling SwiftUI macOS app and linking libcinefs_core.a..."
-xcrun swiftc \
-    -O \
-    -parse-as-library \
-    -import-objc-header "${ROOT_DIR}/macos/CineFS/cinefs_ffi.h" \
-    "${ROOT_DIR}/macos/CineFS/CineFSApp.swift" \
-    "${ROOT_DIR}/target/release/libcinefs_player.a" \
-    -framework AppKit \
-    -framework Metal \
-    -framework QuartzCore \
-    -framework CoreGraphics \
-    -framework IOKit \
-    -framework CoreAudio \
-    -framework AudioToolbox \
-    -framework SwiftUI \
-    -framework UniformTypeIdentifiers \
-    -o "${APP_BUNDLE}/Contents/MacOS/${APP_NAME}"
+lipo -create "${APP_SLICES[@]}" -output "${APP_BUNDLE}/Contents/MacOS/${APP_NAME}"
+lipo -create "${CLI_SLICES[@]}" -output "${APP_BUNDLE}/Contents/MacOS/cinefs-cli"
+# Standalone copy of the universal CLI next to the DMG (uploaded by CI).
+cp "${APP_BUNDLE}/Contents/MacOS/cinefs-cli" "${BUILD_DIR}/cinefs-cli"
+rm -rf "${ARCH_DIR}"
+echo "    architectures: $(lipo -archs "${APP_BUNDLE}/Contents/MacOS/${APP_NAME}")"
 
 # Signing / notarization are driven by environment variables so the same script works
 # locally and in CI:

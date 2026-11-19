@@ -82,6 +82,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin, x86_64-apple-darwin   # universal (Apple Silicon + Intel) app
       - name: Run Rust unit tests
         run: cargo test --workspace
       # Developer ID signing + notarization. Needs these repository secrets
@@ -139,7 +141,7 @@ jobs:
           if-no-files-found: error
           path: |
             macos/build/CineFS.dmg
-            target/release/cinefs-cli
+            macos/build/cinefs-cli
 
   test-and-build-windows:
     name: Windows (CineFS.exe & CineFS-Setup.exe)
