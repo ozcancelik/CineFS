@@ -831,7 +831,6 @@ mod win_gui {
         // Setup Wizard mode actions
         SetupToggleDesktopIcon,
         SetupToggleContextMenu,
-        SetupToggleDefender,
         SetupRunInstall,
         SetupLaunchPortable,
     }
@@ -867,7 +866,6 @@ mod win_gui {
         is_setup_mode: bool,
         setup_desktop_icon: bool,
         setup_context_menu: bool,
-        setup_defender_exclusion: bool,
     }
 
     unsafe impl Send for AppState {}
@@ -1075,7 +1073,6 @@ mod win_gui {
         hwnd: *mut c_void,
         create_desktop_icon: bool,
         register_context_menu: bool,
-        add_defender_exclusion: bool,
     ) {
         // If not running as Administrator, re-launch elevated with `--run-elevated-setup`
         if IsUserAnAdmin() == 0 {
@@ -1088,9 +1085,6 @@ mod win_gui {
                 }
                 if !register_context_menu {
                     args.push_str(" --no-context");
-                }
-                if !add_defender_exclusion {
-                    args.push_str(" --no-defender");
                 }
                 let args_w = wstr(&args);
                 let mut sei: ShellExecuteInfoW = zeroed();
@@ -1113,7 +1107,7 @@ mod win_gui {
         }
 
         cinefs_core::log_info!(
-            "perform_full_setup: desktop={create_desktop_icon} context_menu={register_context_menu} defender={add_defender_exclusion}"
+            "perform_full_setup: desktop={create_desktop_icon} context_menu={register_context_menu}"
         );
         // 1. Install bundled WinFsp if not already installed
         let winfsp_ok = install_bundled_winfsp(hwnd, true);
@@ -1186,12 +1180,6 @@ mod win_gui {
                  Set-ItemProperty -Path 'HKLM:\\SOFTWARE\\Classes\\Directory\\shell\\CineFS' -Name '(default)' -Value 'Mount with CineFS';\n\
                  Set-ItemProperty -Path 'HKLM:\\SOFTWARE\\Classes\\Directory\\shell\\CineFS' -Name 'Icon' -Value \"`\"$ico`\"\";\n\
                  Set-ItemProperty -Path 'HKLM:\\SOFTWARE\\Classes\\Directory\\shell\\CineFS\\command' -Name '(default)' -Value \"`\"$exe`\" `\"%V`\"\";\n",
-            );
-        }
-
-        if add_defender_exclusion {
-            ps_script.push_str(
-                "Add-MpPreference -ExclusionPath (Join-Path $env:USERPROFILE 'CineFS_Mounts') -ErrorAction SilentlyContinue;\n",
             );
         }
 
@@ -2219,11 +2207,6 @@ mod win_gui {
                 st.setup_context_menu,
                 HitAction::SetupToggleContextMenu,
                 "Add 'Mount with CineFS' to Windows Explorer right-click menu (.MLV, .mcraw, .braw & folders)",
-            ),
-            (
-                st.setup_defender_exclusion,
-                HitAction::SetupToggleDefender,
-                "Configure Windows Defender exclusion for zero-latency 4K RAW playback",
             ),
         ];
 
@@ -3311,29 +3294,17 @@ mod win_gui {
                 }
                 InvalidateRect(hwnd, ptr::null(), 0);
             }
-            HitAction::SetupToggleDefender => {
-                if let Ok(mut guard) = APP_STATE.lock() {
-                    if let Some(st) = guard.as_mut() {
-                        st.setup_defender_exclusion = !st.setup_defender_exclusion;
-                    }
-                }
-                InvalidateRect(hwnd, ptr::null(), 0);
-            }
             HitAction::SetupRunInstall => {
-                let (desk, ctx, def) = {
+                let (desk, ctx) = {
                     let Ok(guard) = APP_STATE.lock() else {
                         return;
                     };
                     let Some(st) = guard.as_ref() else {
                         return;
                     };
-                    (
-                        st.setup_desktop_icon,
-                        st.setup_context_menu,
-                        st.setup_defender_exclusion,
-                    )
+                    (st.setup_desktop_icon, st.setup_context_menu)
                 };
-                perform_full_setup(hwnd, desk, ctx, def);
+                perform_full_setup(hwnd, desk, ctx);
             }
             HitAction::SetupLaunchPortable => {
                 if let Ok(mut guard) = APP_STATE.lock() {
@@ -3385,7 +3356,6 @@ mod win_gui {
                     is_setup_mode: exe_is_setup,
                     setup_desktop_icon: true,
                     setup_context_menu: true,
-                    setup_defender_exclusion: true,
                 });
                 0
             }
@@ -3755,8 +3725,7 @@ mod win_gui {
             if args.iter().any(|a| a == "--run-elevated-setup") {
                 let desk = !args.iter().any(|a| a == "--no-desktop");
                 let ctx = !args.iter().any(|a| a == "--no-context");
-                let def = !args.iter().any(|a| a == "--no-defender");
-                perform_full_setup(ptr::null_mut(), desk, ctx, def);
+                perform_full_setup(ptr::null_mut(), desk, ctx);
                 return;
             }
 

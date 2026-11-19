@@ -3,8 +3,6 @@
 ; 1. Installs CineFS.exe (GUI + System Tray) and cinefs-cli.exe
 ; 2. Silently installs the bundled WinFsp runtime MSI if not already present
 ; 3. Registers Windows Explorer right-click "Mount with CineFS" for .MLV, .mcraw, .braw, and folders
-; 4. Optionally adds the virtual mount folder to Windows Defender exclusions for zero-latency 4K playback
-
 #define MyAppName "CineFS"
 #define MyAppVersion "0.1.0"
 #define MyAppPublisher "Özcan Çelik"
@@ -40,8 +38,6 @@ Name: "english"; MessagesFile: "compiler:Default.isl"
 [Tasks]
 Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{cm:AdditionalIcons}"
 Name: "contextmenu"; Description: "Add 'Mount with CineFS' to Windows Explorer right-click menu (.MLV, .mcraw, .braw, and folders)"; GroupDescription: "Shell Integration:"
-Name: "defenderexclusion"; Description: "Add CineFS virtual mount folder to Windows Defender exclusions (recommended for 4K RAW playback)"; GroupDescription: "Performance:"
-
 [Files]
 Source: "..\target\release\cinefs-win.exe"; DestDir: "{app}"; DestName: "CineFS.exe"; Flags: ignoreversion
 Source: "..\target\release\cinefs-cli.exe"; DestDir: "{app}"; DestName: "cinefs-cli.exe"; Flags: ignoreversion
@@ -72,8 +68,6 @@ Root: HKCR; Subkey: "Directory\shell\CineFS\command"; ValueType: string; ValueNa
 [Run]
 ; Silently install WinFsp if not already installed
 Filename: "msiexec.exe"; Parameters: "/i ""{tmp}\winfsp.msi"" /qn /norestart"; StatusMsg: "Installing WinFsp virtual filesystem driver..."; Check: NeedsWinFspInstall; Flags: waituntilterminated
-; Optional Windows Defender exclusion for %USERPROFILE%\CineFS_Mounts
-Filename: "powershell.exe"; Parameters: "-NoProfile -NonInteractive -WindowStyle Hidden -Command ""Add-MpPreference -ExclusionPath '$env:USERPROFILE\CineFS_Mounts' -ErrorAction SilentlyContinue"""; StatusMsg: "Configuring Windows Defender exclusion for CineFS virtual mounts..."; Tasks: defenderexclusion; Flags: runhidden waituntilterminated
 ; Launch CineFS after install
 Filename: "{app}\{#MyAppExeName}"; Description: "{cm:LaunchProgram,{#StringChange(MyAppName, '&', '&&')}}"; Flags: nowait postinstall skipifsilent
 
