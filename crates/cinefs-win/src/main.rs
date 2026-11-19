@@ -55,6 +55,7 @@ mod win_gui {
     use crate::shell::*;
 
     mod player_win;
+    mod thumbs;
 
     // Embedded assets so `CineFS.exe` / `CineFS-Setup.exe` works as a 100% self-contained single binary!
     static APP_ICON_ICO: &[u8] = include_bytes!("../../../windows/AppIcon.ico");
@@ -571,6 +572,12 @@ mod win_gui {
     const COL_CARD_BG: u32 = 0x1B1C20;
     const COL_CARD_BORDER: u32 = 0x2B2D33;
     const COL_CARD_ROW_BG: u32 = 0x202126;
+    /// Background of a clip preview slot (letterbox / while loading).
+    const COL_THUMB_BG: u32 = 0x0B0C0F;
+    /// Clip preview slot size in the clip list (DIPs), same as the macOS app.
+    const THUMB_W: i32 = 96;
+    const THUMB_H: i32 = 54;
+    const THUMB_GAP: i32 = 10;
 
     const COL_DROP_BG: u32 = 0x16171A;
     const COL_DROP_BORDER: u32 = 0x34363D;
@@ -677,6 +684,39 @@ mod win_gui {
                 let row_start = (py * self.width + x0) as usize;
                 let row_end = (py * self.width + x1) as usize;
                 self.pixels[row_start..row_end].fill(color);
+            }
+        }
+
+        /// Draws a straight-RGBA image scaled to fit inside the box (aspect ratio kept, centred),
+        /// with bilinear filtering. Respects the vertical clip band.
+        fn draw_image_fit(&mut self, x: i32, y: i32, w: i32, h: i32, img_w: usize, img_h: usize, rgba: &[u8]) {
+            if w <= 0 || h <= 0 || img_w == 0 || img_h == 0 || rgba.len() < img_w * img_h * 4 {
+                return;
+            }
+            let scale = (w as f32 / img_w as f32).min(h as f32 / img_h as f32);
+            let dw = ((img_w as f32 * scale).round() as i32).max(1);
+            let dh = ((img_h as f32 * scale).round() as i32).max(1);
+            let ox = x + (w - dw) / 2;
+            let oy = y + (h - dh) / 2;
+            let (x0, x1) = (ox.max(0), (ox + dw).min(self.width));
+            let (y0, y1) = (oy.max(self.clip_top), (oy + dh).min(self.clip_bottom));
+            let px_at = |sx: usize, sy: usize, c: usize| rgba[(sy * img_w + sx) * 4 + c] as f32;
+            for py in y0..y1 {
+                let sy = (((py - oy) as f32 + 0.5) / scale - 0.5).clamp(0.0, (img_h - 1) as f32);
+                let (sy0, fy) = (sy.floor() as usize, sy.fract());
+                let sy1 = (sy0 + 1).min(img_h - 1);
+                for px in x0..x1 {
+                    let sx = (((px - ox) as f32 + 0.5) / scale - 0.5).clamp(0.0, (img_w - 1) as f32);
+                    let (sx0, fx) = (sx.floor() as usize, sx.fract());
+                    let sx1 = (sx0 + 1).min(img_w - 1);
+                    let mut rgb = [0u32; 3];
+                    for (c, out) in rgb.iter_mut().enumerate() {
+                        let top = px_at(sx0, sy0, c) * (1.0 - fx) + px_at(sx1, sy0, c) * fx;
+                        let bot = px_at(sx0, sy1, c) * (1.0 - fx) + px_at(sx1, sy1, c) * fx;
+                        *out = (top * (1.0 - fy) + bot * fy).round().clamp(0.0, 255.0) as u32;
+                    }
+                    self.pixels[(py * self.width + px) as usize] = (rgb[0] << 16) | (rgb[1] << 8) | rgb[2];
+                }
             }
         }
 
@@ -847,6 +887,8 @@ mod win_gui {
         CardUnmount(usize),
         ClipExplorer(usize, usize),
         ClipPlay(usize, usize),
+        /// Clip preview image: hovering scrubs through the clip, clicking plays it.
+        ClipThumb(usize, usize),
         // Setup Wizard mode actions
         SetupToggleDesktopIcon,
         SetupToggleContextMenu,
@@ -885,6 +927,8 @@ mod win_gui {
         is_setup_mode: bool,
         setup_desktop_icon: bool,
         setup_context_menu: bool,
+        /// Clip preview under the mouse: (mount index, clip index, position 0..1 across it).
+        scrub_hover: Option<(usize, usize, f32)>,
     }
 
     unsafe impl Send for AppState {}
@@ -2531,6 +2575,9 @@ mod win_gui {
     ) {
         let dpi = st.dpi;
         let header_h = scale_dpi(68, dpi);
+        // Drop cached clip previews of mounts that are gone.
+        let live_ids: Vec<u64> = st.mounts.iter().map(|m| m.id).collect();
+        thumbs::retain_mounts(&live_ids);
         let footer_h = scale_dpi(46, dpi);
         let pad_x = scale_dpi(18, dpi);
 
@@ -2829,7 +2876,8 @@ mod win_gui {
             // Render scrollable list of Mount Cards
             let card_gap = scale_dpi(12, dpi);
             let card_hdr_h = scale_dpi(56, dpi);
-            let clip_row_h = scale_dpi(34, dpi);
+            // Rows are tall enough for the 96x54 clip preview (same size as on macOS).
+            let clip_row_h = scale_dpi(62, dpi);
             let table_hdr_h = scale_dpi(26, dpi);
             let card_pad = scale_dpi(12, dpi);
 
@@ -3035,7 +3083,7 @@ mod win_gui {
                         text_cmds.push(TextDrawCmd {
                             text: String::from("CLIP"),
                             rect: Rect {
-                                left: hx + scale_dpi(26, dpi),
+                                left: hx + scale_dpi(26 + THUMB_W + THUMB_GAP, dpi),
                                 top: ry,
                                 right: cols[6].0 - scale_dpi(10, dpi),
                                 bottom: ry + table_hdr_h,
@@ -3089,6 +3137,57 @@ mod win_gui {
                             },
                             action: play_action,
                         });
+
+                        // Clip preview (middle frame; hover to scrub, click to play), like macOS.
+                        {
+                            let tw = scale_dpi(THUMB_W, dpi);
+                            let th = scale_dpi(THUMB_H, dpi);
+                            let tx = rx + scale_dpi(26, dpi);
+                            let ty = ry + (clip_row_h - th) / 2;
+                            canvas.draw_rounded_rect(tx, ty, tw, th, scale_dpi(3, dpi) as f32, COL_THUMB_BG, 255, None);
+                            let mount_id = st.mounts[m_idx].id;
+                            let key = (mount_id, c_idx);
+                            let clip_arc = st.mounts[m_idx].vfs.clips.get(c_idx).cloned();
+                            let hover_frac = match st.scrub_hover {
+                                Some((hm, hc, f)) if hm == m_idx && hc == c_idx => Some(f),
+                                _ => None,
+                            };
+                            let mut shown = None;
+                            let mut status = None;
+                            if let Some(clip_arc) = &clip_arc {
+                                if let Some(f) = hover_frac {
+                                    shown = thumbs::scrub_frame(key, clip_arc, f);
+                                }
+                                if shown.is_none() {
+                                    match thumbs::list_preview(key, clip_arc) {
+                                        thumbs::Preview::Image(img) => shown = Some(img),
+                                        thumbs::Preview::Loading => status = Some("…"),
+                                        thumbs::Preview::Failed => status = Some("no preview"),
+                                    }
+                                }
+                            }
+                            if let Some(img) = shown {
+                                canvas.draw_image_fit(tx, ty, tw, th, img.width, img.height, &img.rgba);
+                            } else if let Some(s) = status {
+                                text_cmds.push(TextDrawCmd {
+                                    text: String::from(s),
+                                    rect: Rect { left: tx, top: ty, right: tx + tw, bottom: ty + th },
+                                    color: COL_TEXT_MUTED,
+                                    font_kind: FontKind::BadgeSmall,
+                                    flags: DT_CENTER | DT_VCENTER | DT_SINGLELINE,
+                                    clip_y: None,
+                                });
+                            }
+                            if let Some(f) = hover_frac {
+                                // Scrub position bar along the bottom edge.
+                                let bar_w = ((tw as f32 * f).round() as i32).max(scale_dpi(2, dpi));
+                                canvas.fill_rect(tx, ty + th - scale_dpi(2, dpi), bar_w, scale_dpi(2, dpi), COL_ACCENT);
+                            }
+                            st.hit_boxes.push(HitBox {
+                                rect: Rect { left: tx, top: ty, right: tx + tw, bottom: ty + th },
+                                action: HitAction::ClipThumb(m_idx, c_idx),
+                            });
+                        }
 
                         // Table cells (same column geometry as the header row)
                         let cols = table_cols(rx + rw - scale_dpi(12, dpi), dpi);
@@ -3181,7 +3280,7 @@ mod win_gui {
 
                         // Clip Folder Name (clickable to open clip folder directly in Explorer)
                         let folder_rc = Rect {
-                            left: rx + scale_dpi(26, dpi),
+                            left: rx + scale_dpi(26 + THUMB_W + THUMB_GAP, dpi),
                             top: ry,
                             right: cols[6].0 - scale_dpi(10, dpi),
                             bottom: ry + clip_row_h,
@@ -3391,6 +3490,11 @@ mod win_gui {
     }
 
     unsafe fn dispatch_hit_action(hwnd: *mut c_void, action: HitAction) {
+        // Clicking a clip preview plays the clip, like the play button next to it.
+        let action = match action {
+            HitAction::ClipThumb(m, c) => HitAction::ClipPlay(m, c),
+            other => other,
+        };
         match action {
             HitAction::AddFile => open_file_dialog(hwnd),
             HitAction::AddFolder => open_folder_dialog(hwnd),
@@ -3481,6 +3585,7 @@ mod win_gui {
                     open_path_in_explorer(&p, "clip-button");
                 }
             }
+            HitAction::ClipThumb(..) => {} // mapped to ClipPlay above
             HitAction::ClipPlay(m_idx, c_idx) => {
                 let target = {
                     let Ok(guard) = APP_STATE.lock() else {
@@ -3580,6 +3685,7 @@ mod win_gui {
                     is_setup_mode: exe_is_setup,
                     setup_desktop_icon: true,
                     setup_context_menu: true,
+                    scrub_hover: None,
                 });
                 0
             }
@@ -3665,14 +3771,40 @@ mod win_gui {
                             st.tracking_mouse = true;
                             start_track = true;
                         }
-                        let found = st
-                            .hit_boxes
-                            .iter()
-                            .rev()
-                            .find(|h| h.contains(mx, my))
-                            .map(|h| h.action.clone());
+                        let found_box = st.hit_boxes.iter().rev().find(|h| h.contains(mx, my)).cloned();
+                        let found = found_box.as_ref().map(|h| h.action.clone());
                         if found != st.hovered_action {
                             st.hovered_action = found;
+                            needs_repaint = true;
+                        }
+
+                        // Hover scrubbing over a clip preview: repaint only when the scrub
+                        // position (one of the per-clip buckets) actually changes.
+                        let new_scrub = match &found_box {
+                            Some(HitBox { rect, action: HitAction::ClipThumb(m, c) }) => {
+                                let span = (rect.right - rect.left).max(1) as f32;
+                                Some((*m, *c, ((mx - rect.left) as f32 / span).clamp(0.0, 1.0)))
+                            }
+                            _ => None,
+                        };
+                        let frames_of = |st: &AppState, m: usize, c: usize| {
+                            st.mounts.get(m).and_then(|e| e.vfs.clips.get(c)).map_or(1, |k| k.clip.frames.len())
+                        };
+                        let changed = match (st.scrub_hover, new_scrub) {
+                            (None, None) => false,
+                            (Some((om, oc, of)), Some((nm, nc, nf))) => {
+                                om != nm
+                                    || oc != nc
+                                    || thumbs::scrub_bucket(of, frames_of(st, om, oc))
+                                        != thumbs::scrub_bucket(nf, frames_of(st, nm, nc))
+                            }
+                            _ => true,
+                        };
+                        if st.scrub_hover.is_some() && new_scrub.is_none() {
+                            thumbs::end_scrub();
+                        }
+                        st.scrub_hover = new_scrub;
+                        if changed {
                             needs_repaint = true;
                         }
                     }
@@ -3697,6 +3829,10 @@ mod win_gui {
                 if let Ok(mut guard) = APP_STATE.lock() {
                     if let Some(st) = guard.as_mut() {
                         st.tracking_mouse = false;
+                        if st.scrub_hover.take().is_some() {
+                            thumbs::end_scrub();
+                            needs_repaint = true;
+                        }
                         if st.hovered_action.is_some() || st.pressed_action.is_some() {
                             st.hovered_action = None;
                             st.pressed_action = None;
@@ -4000,6 +4136,7 @@ mod win_gui {
             if hwnd.is_null() {
                 return;
             }
+            thumbs::set_main_window(hwnd);
             place_initial_window(hwnd);
             ShowWindow(hwnd, SW_SHOWNORMAL);
 

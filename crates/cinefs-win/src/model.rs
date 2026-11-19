@@ -42,8 +42,12 @@ pub fn format_bytes(bytes: u64) -> String {
 /// Per-clip metadata summary for UI rendering (shared with macOS: `cinefs_core::summary`).
 pub use cinefs_core::summary::ClipSummary as WinClipSummary;
 
+static NEXT_MOUNT_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
 /// Active mounted item managed by the Windows app.
 pub struct WinMountEntry {
+    /// Unique for the lifetime of the process (never reused), e.g. to key per-clip UI caches.
+    pub id: u64,
     pub source_path: PathBuf,
     pub source_paths: Vec<PathBuf>,
     pub source_name: String,
@@ -123,6 +127,7 @@ impl WinMountEntry {
         );
 
         Ok(Self {
+            id: NEXT_MOUNT_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
             source_path,
             source_paths,
             source_name,
