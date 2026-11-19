@@ -2,10 +2,10 @@
 //!
 //! One frame (the middle one) is decoded, every 2x2 Bayer quad is collapsed into one RGB sample
 //! (no real demosaic needed at thumbnail size), levels and as-shot white balance are applied, the
-//! anamorphic stretch is reflected in the output aspect ratio, and a simple auto-exposure + sRGB
-//! curve makes it viewable. Colour: camera RGB -> XYZ (DNG forward matrix, else inverse of the
-//! colour matrix) -> Bradford to D65 -> linear Rec.709 primaries, encoded with the Rec.709 OETF.
-//! Still an identification aid, not a graded render.
+//! anamorphic stretch is reflected in the output aspect ratio. Colour: camera RGB -> XYZ (DNG
+//! forward matrix, else inverse of the colour matrix) -> Bradford to D65 -> linear Rec.709
+//! primaries, encoded with the Rec.709 OETF. No exposure adjustment, so it matches the GPU player
+//! (`cinefs-player`, exposure 1.0). Still an identification aid, not a graded render.
 
 use crate::Result;
 use crate::focus_probe::decode_frame_u16;
@@ -183,17 +183,11 @@ pub fn render_from_bayer(
         }
     }
 
-    // Auto exposure: bring the 97th-percentile luma to ~0.9 (gain limited to avoid blowing up noise).
-    let mut lumas: Vec<f32> = lin.chunks_exact(3).map(|p| 0.2126 * p[0] + 0.7152 * p[1] + 0.0722 * p[2]).collect();
-    lumas.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-    let p97 = lumas[((lumas.len() - 1) as f32 * 0.97) as usize].max(1e-4);
-    let gain = (0.9 / p97).clamp(0.5, 24.0);
-
     let mut rgba = vec![255u8; out_w * out_h * 4];
     for (i, p) in lin.chunks_exact(3).enumerate() {
-        rgba[i * 4] = rec709_encode(p[0] * gain);
-        rgba[i * 4 + 1] = rec709_encode(p[1] * gain);
-        rgba[i * 4 + 2] = rec709_encode(p[2] * gain);
+        rgba[i * 4] = rec709_encode(p[0]);
+        rgba[i * 4 + 1] = rec709_encode(p[1]);
+        rgba[i * 4 + 2] = rec709_encode(p[2]);
     }
     Thumbnail { width: out_w, height: out_h, rgba }
 }

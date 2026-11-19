@@ -120,7 +120,9 @@ final class ActiveMountItem: Identifiable, ObservableObject {
         guard let provider = CGDataProvider(data: data as CFData),
               let cg = CGImage(
                 width: Int(w), height: Int(h), bitsPerComponent: 8, bitsPerPixel: 32,
-                bytesPerRow: Int(w) * 4, space: CGColorSpace(name: CGColorSpace.itur_709)!,
+                // Tagged sRGB, not Rec.709: the player's Metal layer shows the same Rec.709-encoded
+                // values untagged (≈ sRGB), and a 709 tag would make ColorSync darken the preview.
+                bytesPerRow: Int(w) * 4, space: CGColorSpace(name: CGColorSpace.sRGB)!,
                 bitmapInfo: CGBitmapInfo(rawValue: CGImageAlphaInfo.noneSkipLast.rawValue),
                 provider: provider, decode: nil, shouldInterpolate: true, intent: .defaultIntent)
         else { return nil }
@@ -1233,7 +1235,7 @@ struct ClipThumbView: View {
             let img = await Task.detached(priority: .utility) { it.thumbnail(index: i) }.value
             if let img { image = img } else { failed = true }
         }
-        .help("Preview — move the mouse across it to scrub through the clip (Rec.709, as-shot white balance, auto exposure; not a graded render)")
+        .help("Preview — move the mouse across it to scrub through the clip (Rec.709, as-shot white balance; not a graded render)")
     }
 
     private func scrub(to f: CGFloat) {
