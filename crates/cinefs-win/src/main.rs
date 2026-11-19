@@ -473,6 +473,7 @@ mod win_gui {
             cy: i32,
             uFlags: u32,
         ) -> i32;
+        fn SystemParametersInfoW(uiAction: u32, uiParam: u32, pvParam: *mut c_void, fWinIni: u32) -> i32;
     }
 
     #[link(name = "gdi32", kind = "raw-dylib")]
@@ -501,6 +502,9 @@ mod win_gui {
             rop: u32,
         ) -> i32;
         fn GdiFlush() -> i32;
+        fn SaveDC(hdc: *mut c_void) -> i32;
+        fn RestoreDC(hdc: *mut c_void, saved: i32) -> i32;
+        fn IntersectClipRect(hdc: *mut c_void, left: i32, top: i32, right: i32, bottom: i32) -> i32;
         fn SetBkMode(hdc: *mut c_void, mode: i32) -> i32;
         fn SetTextColor(hdc: *mut c_void, color: u32) -> u32;
         fn CreateFontW(
@@ -621,6 +625,10 @@ mod win_gui {
         pixels: &'a mut [u32],
         width: i32,
         height: i32,
+        /// Rows `clip_top..clip_bottom` are drawable; everything else is left untouched.
+        /// Normally the whole canvas; narrowed while drawing the scrolling mount list.
+        clip_top: i32,
+        clip_bottom: i32,
     }
 
     impl<'a> Canvas<'a> {
@@ -628,9 +636,20 @@ mod win_gui {
             self.pixels.fill(color);
         }
 
+        /// Restricts all following drawing to the rows `top..bottom`.
+        fn set_clip_y(&mut self, top: i32, bottom: i32) {
+            self.clip_top = top.clamp(0, self.height);
+            self.clip_bottom = bottom.clamp(self.clip_top, self.height);
+        }
+
+        fn reset_clip(&mut self) {
+            self.clip_top = 0;
+            self.clip_bottom = self.height;
+        }
+
         #[inline]
         fn blend_pixel(&mut self, x: i32, y: i32, color: u32, alpha: u32) {
-            if x < 0 || y < 0 || x >= self.width || y >= self.height || alpha == 0 {
+            if x < 0 || y < self.clip_top || x >= self.width || y >= self.clip_bottom || alpha == 0 {
                 return;
             }
             let idx = (y * self.width + x) as usize;
@@ -648,9 +667,9 @@ mod win_gui {
 
         fn fill_rect(&mut self, x: i32, y: i32, w: i32, h: i32, color: u32) {
             let x0 = x.max(0);
-            let y0 = y.max(0);
+            let y0 = y.max(self.clip_top);
             let x1 = (x + w).min(self.width);
-            let y1 = (y + h).min(self.height);
+            let y1 = (y + h).min(self.clip_bottom);
             if x0 >= x1 || y0 >= y1 {
                 return;
             }
@@ -958,6 +977,37 @@ mod win_gui {
             }
         }
         let _ = SetProcessDPIAware();
+    }
+
+    /// Sizes the main window for the display's scaling and centres it in the work area.
+    ///
+    /// The size used to be a fixed 880x560 *physical* pixels while everything inside the
+    /// window scales with DPI, so on a typical laptop at 125-150 % scaling the window opened
+    /// cramped (~590x370 at 150 %). Now: 1000x680 at 100 % scaling, multiplied by the scale
+    /// factor, never larger than 92 % of the work area and never smaller than the minimum
+    /// size from WM_GETMINMAXINFO.
+    unsafe fn place_initial_window(hwnd: *mut c_void) {
+        const SPI_GETWORKAREA: u32 = 0x0030;
+        const SWP_NOZORDER: u32 = 0x0004;
+        const SWP_NOACTIVATE: u32 = 0x0010;
+
+        let dpi = get_window_dpi(hwnd);
+        let mut work = Rect::default();
+        if SystemParametersInfoW(SPI_GETWORKAREA, 0, &mut work as *mut Rect as *mut c_void, 0) == 0 {
+            return; // keep the CreateWindowExW size
+        }
+        let work_w = work.right - work.left;
+        let work_h = work.bottom - work.top;
+        if work_w <= 0 || work_h <= 0 {
+            return;
+        }
+        let max_w = work_w * 92 / 100;
+        let max_h = work_h * 92 / 100;
+        let w = scale_dpi(1000, dpi).min(max_w).max(scale_dpi(720, dpi).min(work_w));
+        let h = scale_dpi(680, dpi).min(max_h).max(scale_dpi(460, dpi).min(work_h));
+        let x = work.left + (work_w - w) / 2;
+        let y = work.top + (work_h - h) / 2;
+        SetWindowPos(hwnd, ptr::null_mut(), x, y, w, h, SWP_NOZORDER | SWP_NOACTIVATE);
     }
 
     unsafe fn get_window_dpi(hwnd: *mut c_void) -> i32 {
@@ -1968,6 +2018,9 @@ mod win_gui {
         color: u32,
         font_kind: FontKind,
         flags: u32,
+        /// Vertical clip band `(top, bottom)`: text outside it is not drawn. Used for the
+        /// scrolling mount list so it never paints over the header, banner or footer.
+        clip_y: Option<(i32, i32)>,
     }
 
     #[derive(Clone, Copy)]
@@ -2043,6 +2096,8 @@ mod win_gui {
             pixels,
             width: client_w,
             height: client_h,
+            clip_top: 0,
+            clip_bottom: client_h,
         };
         canvas.clear(COL_BG);
 
@@ -2136,6 +2191,16 @@ mod win_gui {
                 FontKind::MonoClip => f_mono,
                 FontKind::BadgeSmall => f_badge,
             };
+            if let Some((top, bottom)) = cmd.clip_y {
+                if cmd.rect.bottom <= top || cmd.rect.top >= bottom {
+                    continue; // entirely scrolled out of view
+                }
+            }
+            let saved_dc = cmd.clip_y.map(|(top, bottom)| {
+                let s = SaveDC(hdc_mem);
+                IntersectClipRect(hdc_mem, 0, top, client_w, bottom);
+                s
+            });
             let prev_f = SelectObject(hdc_mem, hfont);
             SetTextColor(hdc_mem, rgb_to_colorref(cmd.color));
             let w_str = wstr(&cmd.text);
@@ -2148,6 +2213,9 @@ mod win_gui {
                 cmd.flags | DT_NOPREFIX,
             );
             SelectObject(hdc_mem, prev_f);
+            if let Some(s) = saved_dc {
+                RestoreDC(hdc_mem, s);
+            }
         }
 
         for hf in [f_title, f_sub, f_sec, f_semi, f_reg, f_mono, f_badge] {
@@ -2229,6 +2297,7 @@ mod win_gui {
             color: text_col,
             font_kind: FontKind::BodySemibold,
             flags: DT_CENTER | DT_VCENTER | DT_SINGLELINE,
+            clip_y: None,
         });
         st.hit_boxes.push(HitBox { rect, action });
     }
@@ -2281,6 +2350,7 @@ mod win_gui {
             color: COL_TEXT_PRIMARY,
             font_kind: FontKind::TitleBold,
             flags: DT_LEFT | DT_VCENTER | DT_SINGLELINE,
+            clip_y: None,
         });
         text_cmds.push(TextDrawCmd {
             text: String::from(
@@ -2295,6 +2365,7 @@ mod win_gui {
             color: COL_TEXT_SECONDARY,
             font_kind: FontKind::Subtitle,
             flags: DT_LEFT | DT_VCENTER | DT_SINGLELINE,
+            clip_y: None,
         });
 
         canvas.fill_rect(
@@ -2373,6 +2444,7 @@ mod win_gui {
                 color: COL_TEXT_PRIMARY,
                 font_kind: FontKind::BodyRegular,
                 flags: DT_LEFT | DT_VCENTER | DT_SINGLELINE,
+                clip_y: None,
             });
             st.hit_boxes.push(HitBox {
                 rect: row_rc,
@@ -2412,6 +2484,7 @@ mod win_gui {
             color: COL_EMERALD_TEXT,
             font_kind: FontKind::BodySemibold,
             flags: DT_LEFT | DT_VCENTER | DT_SINGLELINE,
+            clip_y: None,
         });
 
         let btn_y = cy + card_h - scale_dpi(58, dpi);
@@ -2480,6 +2553,7 @@ mod win_gui {
             color: COL_TEXT_PRIMARY,
             font_kind: FontKind::TitleBold,
             flags: DT_LEFT | DT_VCENTER | DT_SINGLELINE,
+            clip_y: None,
         });
         text_cmds.push(TextDrawCmd {
             text: String::from("Zero-Copy Virtual CinemaDNG Mount Engine"),
@@ -2492,13 +2566,16 @@ mod win_gui {
             color: COL_TEXT_SECONDARY,
             font_kind: FontKind::Subtitle,
             flags: DT_LEFT | DT_VCENTER | DT_SINGLELINE,
+            clip_y: None,
         });
 
         // Header Right Controls: Mode Picker, + Add Folder, + Add Clip
         let btn_h = scale_dpi(34, dpi);
         let btn_y = (header_h - btn_h) / 2;
 
-        let add_clip_w = scale_dpi(164, dpi);
+        // Short label: the full "+ Add .MLV / .mcraw / .braw" did not fit the button. The file
+        // dialog it opens lists the supported formats anyway.
+        let add_clip_w = scale_dpi(124, dpi);
         let add_clip_rc = Rect {
             left: w - pad_x - add_clip_w,
             top: btn_y,
@@ -2510,7 +2587,7 @@ mod win_gui {
             canvas,
             text_cmds,
             add_clip_rc,
-            "+ Add .MLV / .mcraw / .braw",
+            "+ Add Clips",
             HitAction::AddFile,
             BtnStyle::PrimaryAmber,
             dpi,
@@ -2597,6 +2674,7 @@ mod win_gui {
                 color: COL_AMBER_TEXT,
                 font_kind: FontKind::BodySemibold,
                 flags: DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS,
+                clip_y: None,
             });
             content_top += ban_h;
         } else if let Some((ref msg, is_err)) = st.status_message.clone() {
@@ -2638,6 +2716,7 @@ mod win_gui {
                 color: fg,
                 font_kind: FontKind::BodyRegular,
                 flags: DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS,
+                clip_y: None,
             });
             content_top += ban_h;
         }
@@ -2689,6 +2768,7 @@ mod win_gui {
                 color: COL_TEXT_PRIMARY,
                 font_kind: FontKind::SectionTitle,
                 flags: DT_CENTER | DT_VCENTER | DT_SINGLELINE,
+                clip_y: None,
             });
 
             text_cmds.push(TextDrawCmd {
@@ -2704,6 +2784,7 @@ mod win_gui {
                 color: COL_TEXT_SECONDARY,
                 font_kind: FontKind::BodyRegular,
                 flags: DT_CENTER | DT_WORDBREAK,
+                clip_y: None,
             });
 
             let b_w1 = scale_dpi(190, dpi);
@@ -2761,6 +2842,13 @@ mod win_gui {
             st.max_scroll_y = (total_h - view_h).max(0);
             st.scroll_y = st.scroll_y.clamp(0, st.max_scroll_y);
 
+            // Keep the scrolled cards inside the list area: without this they were painted over
+            // the header and the status banner (and their buttons stayed clickable there,
+            // stealing clicks from e.g. "Dismiss").
+            canvas.set_clip_y(content_top, content_bottom);
+            let list_text_start = text_cmds.len();
+            let list_hit_start = st.hit_boxes.len();
+
             let mut cur_y = content_top + scale_dpi(14, dpi) - st.scroll_y;
             let num_mounts = st.mounts.len();
 
@@ -2810,6 +2898,7 @@ mod win_gui {
                         color: COL_EMERALD_TEXT,
                         font_kind: FontKind::BodySemibold,
                         flags: DT_CENTER | DT_VCENTER | DT_SINGLELINE,
+                        clip_y: None,
                     });
 
                     // Card Action Buttons: `[ Open in Explorer ]`, `[ Import to Resolve ]`, `[ Unmount ]`
@@ -2894,6 +2983,7 @@ mod win_gui {
                         color: COL_TEXT_PRIMARY,
                         font_kind: FontKind::BodySemibold,
                         flags: DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS,
+                        clip_y: None,
                     });
                     text_cmds.push(TextDrawCmd {
                         text: sub_info,
@@ -2906,6 +2996,7 @@ mod win_gui {
                         color: COL_TEXT_SECONDARY,
                         font_kind: FontKind::Subtitle,
                         flags: DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS,
+                        clip_y: None,
                     });
 
                     canvas.fill_rect(
@@ -2938,6 +3029,7 @@ mod win_gui {
                                 color: COL_TEXT_MUTED,
                                 font_kind: FontKind::BadgeSmall,
                                 flags: al | DT_VCENTER | DT_SINGLELINE,
+                                clip_y: None,
                             });
                         }
                         text_cmds.push(TextDrawCmd {
@@ -2951,6 +3043,7 @@ mod win_gui {
                             color: COL_TEXT_MUTED,
                             font_kind: FontKind::BadgeSmall,
                             flags: DT_LEFT | DT_VCENTER | DT_SINGLELINE,
+                            clip_y: None,
                         });
                         canvas.fill_rect(hx, ry + table_hdr_h - 1, hw, 1, COL_DIVIDER);
                         ry += table_hdr_h;
@@ -3007,6 +3100,7 @@ mod win_gui {
                             color,
                             font_kind: FontKind::Subtitle,
                             flags: flags | DT_VCENTER | DT_SINGLELINE,
+                            clip_y: None,
                         };
 
                         // MODE (green only for zero-decode passthrough)
@@ -3035,6 +3129,7 @@ mod win_gui {
                             color: p_fg,
                             font_kind: FontKind::BadgeSmall,
                             flags: DT_CENTER | DT_VCENTER | DT_SINGLELINE,
+                            clip_y: None,
                         });
 
                         // AUDIO
@@ -3068,6 +3163,7 @@ mod win_gui {
                                 color: COL_AMBER_TEXT,
                                 font_kind: FontKind::BadgeSmall,
                                 flags: DT_CENTER | DT_VCENTER | DT_SINGLELINE,
+                                clip_y: None,
                             });
                         } else {
                             text_cmds.push(cell(String::from("–"), cols[2], COL_TEXT_MUTED, DT_RIGHT));
@@ -3096,6 +3192,7 @@ mod win_gui {
                             color: COL_TEXT_PRIMARY,
                             font_kind: FontKind::MonoClip,
                             flags: DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS,
+                            clip_y: None,
                         });
                         st.hit_boxes.push(HitBox {
                             rect: folder_rc,
@@ -3107,6 +3204,23 @@ mod win_gui {
                 }
 
                 cur_y += card_h + card_gap;
+            }
+
+            canvas.reset_clip();
+            for cmd in &mut text_cmds[list_text_start..] {
+                cmd.clip_y = Some((content_top, content_bottom));
+            }
+            // Clickable areas: trim to the visible list area, drop the ones scrolled out of it.
+            let mut idx = list_hit_start;
+            while idx < st.hit_boxes.len() {
+                let r = &mut st.hit_boxes[idx].rect;
+                r.top = r.top.max(content_top);
+                r.bottom = r.bottom.min(content_bottom);
+                if r.top >= r.bottom {
+                    st.hit_boxes.remove(idx);
+                } else {
+                    idx += 1;
+                }
             }
         }
 
@@ -3173,6 +3287,7 @@ mod win_gui {
             color: COL_TEXT_SECONDARY,
             font_kind: FontKind::Subtitle,
             flags: DT_LEFT | DT_VCENTER | DT_SINGLELINE,
+            clip_y: None,
         });
         st.hit_boxes.push(HitBox {
             rect: cb_hit,
@@ -3271,6 +3386,7 @@ mod win_gui {
             color: COL_TEXT_MUTED,
             font_kind: FontKind::Subtitle,
             flags: DT_RIGHT | DT_VCENTER | DT_SINGLELINE,
+            clip_y: None,
         });
     }
 
@@ -3870,7 +3986,8 @@ mod win_gui {
                 0,
                 class_name.as_ptr(),
                 title.as_ptr(),
-                WS_OVERLAPPEDWINDOW | WS_VISIBLE | WS_CLIPCHILDREN,
+                // Created hidden: it is sized for the screen's scaling below, then shown.
+                WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN,
                 160,
                 120,
                 880,
@@ -3883,6 +4000,8 @@ mod win_gui {
             if hwnd.is_null() {
                 return;
             }
+            place_initial_window(hwnd);
+            ShowWindow(hwnd, SW_SHOWNORMAL);
 
             // Auto-mount any paths passed via command line (Explorer Right-Click / Open With)
             // or handed over by an elevated instance that relaunched us un-elevated.

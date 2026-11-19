@@ -462,6 +462,8 @@ unsafe fn paint_bar(st: &mut PlayerWin, hdc_win: *mut c_void, client_w: i32, cli
         pixels: std::slice::from_raw_parts_mut(bits, (w * bar_h) as usize),
         width: w,
         height: bar_h,
+        clip_top: 0,
+        clip_bottom: bar_h,
     };
     canvas.clear(COL_FOOTER_BG);
     canvas.fill_rect(0, 0, w, 1, COL_DIVIDER);
