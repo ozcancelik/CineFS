@@ -469,6 +469,62 @@ final class PlayerWindows: NSObject, NSWindowDelegate {
 
 // MARK: - Mount Manager
 
+/// A mount that is still being indexed: one row per clip file with its state (same as Windows).
+/// `@unchecked Sendable`: the mounting thread only passes it around; its state is read and
+/// changed exclusively on the main thread.
+final class PendingMount: ObservableObject, Identifiable, @unchecked Sendable {
+    enum ClipState: Equatable {
+        case waiting, loading, ready
+        case failed(String)
+    }
+
+    struct Clip: Identifiable {
+        let id: Int
+        let name: String
+        var state: ClipState
+    }
+
+    let id = UUID()
+    let title: String
+    @Published var clips: [Clip] = []
+    /// All clips indexed; the volume itself is being mounted.
+    @Published var attaching = false
+
+    init(title: String) {
+        self.title = title
+    }
+
+    var failedNames: [String] {
+        clips.compactMap { if case .failed = $0.state { return $0.name } else { return nil } }
+    }
+
+    /// Applies one progress event from `cinefs_mount_with_progress` (main thread).
+    func apply(event: UInt32, index: Int, total: Int, text: String) {
+        switch event {
+        case 0:
+            if index == clips.count {
+                clips.append(Clip(id: index, name: URL(fileURLWithPath: text).lastPathComponent, state: .waiting))
+            }
+        case 1, 2, 3:
+            guard clips.indices.contains(index) else { return }
+            clips[index].state = event == 1 ? .loading : (event == 2 ? .ready : .failed(text))
+            if event != 1 && index == total - 1 { attaching = true }
+        default:
+            break
+        }
+    }
+}
+
+/// C callback for `cinefs_mount_with_progress`: forwards each event to its `PendingMount` on the
+/// main thread. `ctx` is an unretained `PendingMount` kept alive by the mounting closure.
+private let mountProgressCallback: CineFsMountProgressFn = { ctx, event, index, total, text in
+    guard let ctx else { return }
+    let pending = Unmanaged<PendingMount>.fromOpaque(ctx).takeUnretainedValue()
+    let message = text.map { String(cString: $0) } ?? ""
+    let i = Int(index), n = Int(total)
+    DispatchQueue.main.async { pending.apply(event: event, index: i, total: n, text: message) }
+}
+
 @MainActor
 final class MountManager: ObservableObject {
     static let shared = MountManager()
@@ -476,6 +532,8 @@ final class MountManager: ObservableObject {
     private static let resolvePathDefaultsKey = "com.ozcancelik.cinefs.resolveAppPath"
 
     @Published var mounts: [ActiveMountItem] = []
+    /// Mounts still being indexed (shown above `mounts` with per-clip progress).
+    @Published var pending: [PendingMount] = []
     /// UserDefaults keys for the persisted preferences (defaults for clips mounted from now on).
     private enum Pref {
         static let mode = "com.ozcancelik.cinefs.payloadMode"
@@ -663,12 +721,22 @@ final class MountManager: ObservableObject {
         isMounting = true
         errorMessage = nil
 
+        let pendingItem = PendingMount(
+            title: urls.count == 1 ? urls[0].lastPathComponent : "\(urls.count) items"
+        )
+        pending.insert(pendingItem, at: 0)
+
         DispatchQueue.global(qos: .userInitiated).async {
             var errPtr: UnsafeMutablePointer<CChar>? = nil
+            let progressCtx = Unmanaged.passUnretained(pendingItem).toOpaque()
             let rawHandle = sourcePaths.joined(separator: "\n").withCString { srcCStr in
                 mountPointPath.withCString { mpCStr in
-                    cinefs_mount(srcCStr, mpCStr, mode, cacheMB, &errPtr)
+                    cinefs_mount_with_progress(srcCStr, mpCStr, mode, cacheMB, &errPtr, mountProgressCallback, progressCtx)
                 }
+            }
+            // Runs after the progress events already queued on the main thread.
+            DispatchQueue.main.async {
+                self.pending.removeAll { $0.id == pendingItem.id }
             }
 
             guard let handle = rawHandle else {
@@ -706,7 +774,9 @@ final class MountManager: ObservableObject {
                 let item = ActiveMountItem(handle: handle, summary: summary)
                 self.mounts.insert(item, at: 0)
                 self.isMounting = false
+                let failed = pendingItem.failedNames
                 self.statusMessage = "Mounted \(summary.clips.count) clip(s) at \(summary.mountPoint)"
+                    + (failed.isEmpty ? "" : " — \(failed.count) file(s) could not be opened: \(failed.joined(separator: ", "))")
                 cineLog("INFO", "UI: mounted \(summary.clips.count) clip(s) at \(summary.mountPoint)")
                 if shouldReveal {
                     self.revealInFinder(path: summary.mountPoint)
@@ -953,7 +1023,7 @@ struct MainMountWindowView: View {
 
             // Drop Zone + Mount List
             ZStack {
-                if manager.mounts.isEmpty {
+                if manager.mounts.isEmpty && manager.pending.isEmpty {
                     VStack(spacing: 14) {
                         Image(systemName: "arrow.down.doc.fill")
                             .font(.system(size: 42))
@@ -979,6 +1049,9 @@ struct MainMountWindowView: View {
                 } else {
                     ScrollView {
                         LazyVStack(spacing: 12) {
+                            ForEach(manager.pending) { p in
+                                PendingMountCardView(pending: p)
+                            }
                             ForEach(manager.mounts) { item in
                                 MountCardView(item: item)
                             }
@@ -1354,6 +1427,85 @@ struct MountCardView: View {
             Divider()
 
             ClipTableView(item: item)
+        }
+        .padding(12)
+        .background(
+            RoundedRectangle(cornerRadius: 8)
+                .fill(Color(nsColor: .controlBackgroundColor))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 8)
+                .stroke(Color.primary.opacity(0.08), lineWidth: 1)
+        )
+    }
+}
+
+/// Card for a mount that is still being indexed: overall progress, then one row per clip file
+/// with its state (waiting / indexing / ready / failed). Mirrors the Windows app.
+struct PendingMountCardView: View {
+    @ObservedObject var pending: PendingMount
+
+    private var done: Int {
+        pending.clips.filter { $0.state != .waiting && $0.state != .loading }.count
+    }
+
+    private var headline: String {
+        if pending.attaching { return "Mounting the volume…" }
+        if pending.clips.isEmpty { return "Looking for clips…" }
+        let failed = pending.failedNames.count
+        return "Indexing clips… \(done) / \(pending.clips.count)" + (failed > 0 ? "   (\(failed) failed)" : "")
+    }
+
+    private func look(_ state: PendingMount.ClipState) -> (String, String, Color) {
+        switch state {
+        case .waiting: return ("clock", "Waiting", .secondary)
+        case .loading: return ("arrow.triangle.2.circlepath", "Indexing…", .orange)
+        case .ready: return ("checkmark.circle.fill", "Ready", .green)
+        case .failed(let msg): return ("exclamationmark.triangle.fill", "Failed: \(msg)", .red)
+        }
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 10) {
+                ProgressView().controlSize(.small)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(pending.title)
+                        .font(.system(size: 14, weight: .semibold))
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                    Text(headline)
+                        .font(.system(size: 11))
+                        .foregroundStyle(.orange)
+                }
+                Spacer()
+            }
+            ProgressView(value: Double(done), total: Double(max(pending.clips.count, 1)))
+                .tint(.orange)
+            if !pending.clips.isEmpty {
+                Divider()
+                VStack(alignment: .leading, spacing: 4) {
+                    ForEach(pending.clips) { clip in
+                        let (icon, label, color) = look(clip.state)
+                        HStack(spacing: 8) {
+                            Image(systemName: icon)
+                                .foregroundStyle(color)
+                                .frame(width: 16)
+                            Text(clip.name)
+                                .font(.system(size: 12, design: .monospaced))
+                                .foregroundStyle(clip.state == .waiting ? .secondary : .primary)
+                                .lineLimit(1)
+                                .truncationMode(.middle)
+                            Spacer()
+                            Text(label)
+                                .font(.system(size: 11))
+                                .foregroundStyle(color)
+                                .lineLimit(1)
+                                .frame(maxWidth: 260, alignment: .trailing)
+                        }
+                    }
+                }
+            }
         }
         .padding(12)
         .background(

@@ -49,6 +49,29 @@ pub unsafe extern "C" fn cinefs_mount(
     cache_mb: usize,
     out_error: *mut *mut c_char,
 ) -> *mut CineFsMountHandle {
+    cinefs_mount_with_progress(source_paths, mount_point, mode, cache_mb, out_error, None, ptr::null_mut())
+}
+
+/// Progress callback for [`cinefs_mount_with_progress`]: `(ctx, event, index, total, text)`.
+///
+/// Events: `0` = clip listed (`text` = file path; sent for every clip, in mount order, before
+/// indexing starts), `1` = clip is being indexed, `2` = clip ready, `3` = clip failed (`text` =
+/// reason; the other clips are still mounted). `text` is only valid during the call. Called on
+/// the mounting thread, never concurrently.
+pub type CineFsMountProgressFn =
+    unsafe extern "C" fn(ctx: *mut std::ffi::c_void, event: u32, index: usize, total: usize, text: *const c_char);
+
+/// Same as [`cinefs_mount`], reporting per-clip progress through `progress` (may be `NULL`).
+#[no_mangle]
+pub unsafe extern "C" fn cinefs_mount_with_progress(
+    source_paths: *const c_char,
+    mount_point: *const c_char,
+    mode: u32,
+    cache_mb: usize,
+    out_error: *mut *mut c_char,
+    progress: Option<CineFsMountProgressFn>,
+    ctx: *mut std::ffi::c_void,
+) -> *mut CineFsMountHandle {
     if !out_error.is_null() {
         *out_error = ptr::null_mut();
     }
@@ -79,7 +102,25 @@ pub unsafe extern "C" fn cinefs_mount(
     let t0 = Instant::now();
     let cache_bytes = cache_mb.max(64) * 1024 * 1024;
     let mut vfs = CineFs::new(cache_bytes);
-    if let Err(e) = crate::summary::mount_many(&mut vfs, &sources, mode_from_u32(mode)) {
+    let files = crate::summary::expand_sources(&sources);
+    let total = files.len();
+    let report = |event: u32, index: usize, text: &str| {
+        if let Some(cb) = progress {
+            let c = CString::new(text.replace('\0', "")).unwrap_or_default();
+            cb(ctx, event, index, total, c.as_ptr());
+        }
+    };
+    for (i, f) in files.iter().enumerate() {
+        report(0, i, &f.to_string_lossy());
+    }
+    let result = crate::summary::mount_files_with_progress(&mut vfs, &files, mode_from_u32(mode), |i, state| {
+        match state {
+            crate::summary::ClipLoad::Loading => report(1, i, ""),
+            crate::summary::ClipLoad::Ready => report(2, i, ""),
+            crate::summary::ClipLoad::Failed(msg) => report(3, i, &msg),
+        }
+    });
+    if let Err(e) = result {
         crate::log::write("ERROR", &format!("mount failed: {e}"));
         write_error(out_error, &e.to_string());
         return ptr::null_mut();

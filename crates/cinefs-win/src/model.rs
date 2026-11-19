@@ -63,15 +63,20 @@ pub struct WinMountEntry {
 }
 
 impl WinMountEntry {
+    /// Indexes the clip `files` (the user's selection `source_paths`, expanded with
+    /// `cinefs_core::summary::expand_sources`) into ONE virtual volume and mounts it at
+    /// `mount_point`. `on_progress(file index, state)` is called as each clip is indexed.
     pub fn mount(
         source_paths: Vec<PathBuf>,
+        files: &[PathBuf],
         mount_point: PathBuf,
         mode: DngPayloadMode,
+        on_progress: impl FnMut(usize, cinefs_core::summary::ClipLoad),
     ) -> cinefs_core::Result<Self> {
         let t0 = Instant::now();
         let mut vfs = CineFs::new(512 * 1024 * 1024);
         // All sources share ONE virtual volume (one drive letter / one folder).
-        cinefs_core::summary::mount_many(&mut vfs, &source_paths, mode)?;
+        cinefs_core::summary::mount_files_with_progress(&mut vfs, files, mode, on_progress)?;
         let source_path = source_paths[0].clone();
         let index_time_ms = t0.elapsed().as_secs_f64() * 1000.0;
 

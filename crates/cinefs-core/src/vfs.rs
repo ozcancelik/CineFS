@@ -1353,7 +1353,7 @@ impl CineFs {
     }
 }
 
-fn collect_mlv_files_in_dir(dir: &Path) -> Result<Vec<PathBuf>> {
+pub(crate) fn collect_mlv_files_in_dir(dir: &Path) -> Result<Vec<PathBuf>> {
     let mut out = Vec::new();
     for entry in fs::read_dir(dir)? {
         let entry = entry?;

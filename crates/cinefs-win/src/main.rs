@@ -917,6 +917,8 @@ mod win_gui {
         resolve_fuscript_path: Option<PathBuf>,
         status_message: Option<(String, bool)>, // (message, is_error)
         mounts: Vec<WinMountEntry>,
+        /// Mount requests that are queued or being indexed, newest first (shown above the mounts).
+        pending: Vec<PendingMount>,
         scroll_y: i32,
         max_scroll_y: i32,
         hit_boxes: Vec<HitBox>,
@@ -1335,8 +1337,66 @@ mod win_gui {
     });
 
     struct MountQueue {
-        jobs: std::collections::VecDeque<Vec<PathBuf>>,
+        /// (pending card id, sources)
+        jobs: std::collections::VecDeque<(u64, Vec<PathBuf>)>,
         worker_running: bool,
+    }
+
+    /// A mount request shown in the list while it waits / is indexed: one row per clip file.
+    struct PendingMount {
+        id: u64,
+        title: String,
+        phase: PendingPhase,
+        /// (file name, state) in mount order; filled when the worker starts on this request.
+        clips: Vec<(String, PendingClip)>,
+    }
+
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    enum PendingPhase {
+        Queued,
+        Indexing,
+        Attaching,
+    }
+
+    #[derive(Clone, PartialEq, Eq)]
+    enum PendingClip {
+        Waiting,
+        Loading,
+        Ready,
+        Failed(String),
+    }
+
+    static NEXT_PENDING_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
+    /// Runs `f` on the pending card `id` (if it still exists) and repaints the window.
+    fn update_pending(hwnd: *mut c_void, id: u64, f: impl FnOnce(&mut PendingMount)) {
+        if let Ok(mut guard) = APP_STATE.lock() {
+            if let Some(p) = guard.as_mut().and_then(|st| st.pending.iter_mut().find(|p| p.id == id)) {
+                f(p);
+            }
+        }
+        unsafe {
+            InvalidateRect(hwnd, ptr::null(), 0);
+        }
+    }
+
+    /// Removes the pending card `id` when the request is finished, however it ends.
+    struct PendingCardGuard {
+        hwnd: *mut c_void,
+        id: u64,
+    }
+
+    impl Drop for PendingCardGuard {
+        fn drop(&mut self) {
+            if let Ok(mut guard) = APP_STATE.lock() {
+                if let Some(st) = guard.as_mut() {
+                    st.pending.retain(|p| p.id != self.id);
+                }
+            }
+            unsafe {
+                InvalidateRect(self.hwnd, ptr::null(), 0);
+            }
+        }
     }
 
     /// Returns the path of an existing mount that already serves `source` (single-source requests only).
@@ -1388,24 +1448,37 @@ mod win_gui {
             }
         }
 
-        let clip_count = sources.len();
-        let (spawn_worker, queued_ahead) = {
+        // Show the request in the list right away (a card with one row per clip, filled in by
+        // the worker as it lists and indexes the clips).
+        let pending_id = NEXT_PENDING_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let title = if sources.len() == 1 {
+            sources[0]
+                .file_name()
+                .map(|n| n.to_string_lossy().to_string())
+                .unwrap_or_else(|| sources[0].display().to_string())
+        } else {
+            format!("{} items", sources.len())
+        };
+        if let Ok(mut guard) = APP_STATE.lock() {
+            if let Some(st) = guard.as_mut() {
+                st.pending.insert(
+                    0,
+                    PendingMount { id: pending_id, title, phase: PendingPhase::Queued, clips: Vec::new() },
+                );
+                st.scroll_y = 0; // the new card is at the top
+            }
+        }
+        InvalidateRect(hwnd, ptr::null(), 0);
+
+        let spawn_worker = {
             let Ok(mut q) = MOUNT_QUEUE.lock() else {
                 return;
             };
-            let ahead = q.jobs.len() + usize::from(q.worker_running);
-            q.jobs.push_back(sources);
+            q.jobs.push_back((pending_id, sources));
             let spawn = !q.worker_running;
             q.worker_running = true;
-            (spawn, ahead)
+            spawn
         };
-
-        let what = if clip_count == 1 { String::from("1 item") } else { format!("{clip_count} items") };
-        if queued_ahead == 0 {
-            set_status(hwnd, format!("Mounting {what}… (indexing clips, this can take a few seconds)"), false);
-        } else {
-            set_status(hwnd, format!("Queued {what}; it will be mounted after the current mount finishes."), false);
-        }
 
         if spawn_worker {
             let hwnd_val = hwnd as usize;
@@ -1417,31 +1490,22 @@ mod win_gui {
     /// requests can never pick the same free drive letter), then exits when the queue is empty.
     fn mount_worker(hwnd: *mut c_void) {
         loop {
-            let (job, remaining) = {
+            let (pending_id, job) = {
                 let Ok(mut q) = MOUNT_QUEUE.lock() else {
                     return;
                 };
                 match q.jobs.pop_front() {
-                    Some(job) => {
-                        let remaining = q.jobs.len();
-                        (job, remaining)
-                    }
+                    Some(job) => job,
                     None => {
                         q.worker_running = false;
                         return;
                     }
                 }
             };
-            if remaining > 0 {
-                let what = if job.len() == 1 { String::from("1 item") } else { format!("{} items", job.len()) };
-                set_status(
-                    hwnd,
-                    format!("Mounting {what}… ({remaining} more request(s) waiting)"),
-                    false,
-                );
-            }
+            // Removes the pending card when this request ends (also on panic).
+            let _card = PendingCardGuard { hwnd, id: pending_id };
             // A panic must not leave the queue stuck with worker_running = true.
-            let result = catch_unwind(AssertUnwindSafe(|| unsafe { mount_job(hwnd, job) }));
+            let result = catch_unwind(AssertUnwindSafe(|| unsafe { mount_job(hwnd, pending_id, job) }));
             if result.is_err() {
                 cinefs_core::log_error!("mount worker: a mount request panicked; continuing with the queue");
                 set_status(hwnd, String::from("Mount failed unexpectedly (see log: tray menu > Open Log)"), true);
@@ -1450,7 +1514,7 @@ mod win_gui {
     }
 
     /// Does the actual mount of one request. Runs on the mount worker thread, never on the UI thread.
-    unsafe fn mount_job(hwnd: *mut c_void, sources: Vec<PathBuf>) {
+    unsafe fn mount_job(hwnd: *mut c_void, pending_id: u64, sources: Vec<PathBuf>) {
         let source = sources[0].clone();
         // The same clip may have been queued twice before the first request finished.
         if let Some(mp) = find_existing_mount(&sources) {
@@ -1501,9 +1565,49 @@ mod win_gui {
             }
         };
 
+        // List every clip file of the selection (folders are searched) so the pending card can
+        // show one row per clip with its state while they are indexed.
+        let files = cinefs_core::summary::expand_sources(&sources);
+        let total = files.len();
+        update_pending(hwnd, pending_id, |p| {
+            p.phase = PendingPhase::Indexing;
+            p.clips = files
+                .iter()
+                .map(|f| {
+                    let name = f.file_name().map_or_else(|| f.display().to_string(), |n| n.to_string_lossy().to_string());
+                    (name, PendingClip::Waiting)
+                })
+                .collect();
+        });
+
         // 3. Perform mount outside of APP_STATE lock (because WinFsp broadcasts WM_DEVICECHANGE to hwnd!)
-        cinefs_core::log_info!("mounting '{}' at '{}'", source.display(), mount_point.display());
-        let mount_res = WinMountEntry::mount(sources.clone(), mount_point, mode);
+        cinefs_core::log_info!(
+            "mounting '{}' ({total} clip file(s)) at '{}'",
+            source.display(),
+            mount_point.display()
+        );
+        let mut failed: Vec<String> = Vec::new();
+        let mount_res = WinMountEntry::mount(sources.clone(), &files, mount_point, mode, |i, state| {
+            let row = match state {
+                cinefs_core::summary::ClipLoad::Loading => PendingClip::Loading,
+                cinefs_core::summary::ClipLoad::Ready => PendingClip::Ready,
+                cinefs_core::summary::ClipLoad::Failed(msg) => {
+                    if let Some(f) = files.get(i) {
+                        failed.push(f.file_name().map_or_else(String::new, |n| n.to_string_lossy().to_string()));
+                    }
+                    PendingClip::Failed(msg)
+                }
+            };
+            let last_done = i + 1 == total && row != PendingClip::Loading;
+            update_pending(hwnd, pending_id, |p| {
+                if let Some(c) = p.clips.get_mut(i) {
+                    c.1 = row;
+                }
+                if last_done {
+                    p.phase = PendingPhase::Attaching; // indexing finished, the drive is being mounted
+                }
+            });
+        });
 
         match mount_res {
             Ok(entry) => {
@@ -1517,13 +1621,20 @@ mod win_gui {
                 );
                 // Make sure Windows really exposes the volume before opening Explorer / Resolve.
                 let visible = verify_mount_visible(&explorer_path, 6000);
-                let status = format!(
+                let mut status = format!(
                     "Mounted {} virtual CinemaDNG clip(s) at {} ({}, indexed in {:.1} ms)",
                     entry.clips.len(),
                     explorer_path.display(),
                     format_bytes(entry.total_bytes),
                     entry.index_time_ms
                 );
+                if !failed.is_empty() {
+                    status.push_str(&format!(
+                        " — {} file(s) could not be opened: {}",
+                        failed.len(),
+                        failed.join(", ")
+                    ));
+                }
                 // If the window was closed while this mount was running, the app state is gone
                 // and nobody would ever unmount this volume: unmount it right away instead.
                 let mut orphan = Some(entry);
@@ -2565,6 +2676,104 @@ mod win_gui {
         );
     }
 
+    const PENDING_HDR_H: i32 = 46;
+    const PENDING_ROW_H: i32 = 22;
+
+    fn pending_card_height(p: &PendingMount, dpi: i32) -> i32 {
+        scale_dpi(PENDING_HDR_H + 10, dpi) + p.clips.len() as i32 * scale_dpi(PENDING_ROW_H, dpi)
+    }
+
+    /// Card for a mount request that is queued or being indexed: a header with the overall
+    /// progress, then one row per clip file with its state (waiting / indexing / ready / failed).
+    fn render_pending_card(
+        p: &PendingMount,
+        canvas: &mut Canvas<'_>,
+        text_cmds: &mut Vec<TextDrawCmd>,
+        x: i32,
+        y: i32,
+        w: i32,
+        dpi: i32,
+    ) {
+        let h = pending_card_height(p, dpi);
+        canvas.draw_rounded_rect(x, y, w, h, scale_dpi(10, dpi) as f32, COL_CARD_BG, 255, Some((COL_CARD_BORDER, 1.0)));
+
+        let total = p.clips.len();
+        let done = p.clips.iter().filter(|c| matches!(c.1, PendingClip::Ready | PendingClip::Failed(_))).count();
+        let failed = p.clips.iter().filter(|c| matches!(c.1, PendingClip::Failed(_))).count();
+        let headline = match p.phase {
+            PendingPhase::Queued => String::from("Waiting for the current mount to finish…"),
+            PendingPhase::Indexing if total == 0 => String::from("Looking for clips…"),
+            PendingPhase::Indexing => format!("Indexing clips… {done} / {total}"),
+            PendingPhase::Attaching => String::from("Mounting the virtual drive…"),
+        };
+        let pad = scale_dpi(16, dpi);
+        text_cmds.push(TextDrawCmd {
+            text: p.title.clone(),
+            rect: Rect { left: x + pad, top: y + scale_dpi(6, dpi), right: x + w - pad, bottom: y + scale_dpi(26, dpi) },
+            color: COL_TEXT_PRIMARY,
+            font_kind: FontKind::BodySemibold,
+            flags: DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS,
+            clip_y: None,
+        });
+        text_cmds.push(TextDrawCmd {
+            text: if failed > 0 { format!("{headline}   ({failed} failed)") } else { headline },
+            rect: Rect { left: x + pad, top: y + scale_dpi(24, dpi), right: x + w - pad, bottom: y + scale_dpi(42, dpi) },
+            color: COL_ACCENT,
+            font_kind: FontKind::Subtitle,
+            flags: DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS,
+            clip_y: None,
+        });
+        // Progress bar along the bottom of the header.
+        let bar_y = y + scale_dpi(PENDING_HDR_H, dpi);
+        canvas.fill_rect(x + pad, bar_y, w - pad * 2, scale_dpi(2, dpi), COL_CARD_BORDER);
+        if total > 0 {
+            let filled = ((w - pad * 2) as i64 * done as i64 / total as i64) as i32;
+            canvas.fill_rect(x + pad, bar_y, filled, scale_dpi(2, dpi), COL_ACCENT);
+        }
+
+        let mut ry = bar_y + scale_dpi(8, dpi);
+        let row_h = scale_dpi(PENDING_ROW_H, dpi);
+        let state_w = scale_dpi(220, dpi);
+        for (name, state) in &p.clips {
+            let (mark, label, color) = match state {
+                PendingClip::Waiting => ("•", String::from("Waiting"), COL_TEXT_MUTED),
+                PendingClip::Loading => ("…", String::from("Indexing…"), COL_ACCENT),
+                PendingClip::Ready => ("✓", String::from("Ready"), COL_EMERALD_TEXT),
+                PendingClip::Failed(msg) => ("⚠", format!("Failed: {msg}"), COL_ERR_TEXT),
+            };
+            text_cmds.push(TextDrawCmd {
+                text: String::from(mark),
+                rect: Rect { left: x + pad, top: ry, right: x + pad + scale_dpi(16, dpi), bottom: ry + row_h },
+                color,
+                font_kind: FontKind::BodySemibold,
+                flags: DT_CENTER | DT_VCENTER | DT_SINGLELINE,
+                clip_y: None,
+            });
+            text_cmds.push(TextDrawCmd {
+                text: name.clone(),
+                rect: Rect {
+                    left: x + pad + scale_dpi(24, dpi),
+                    top: ry,
+                    right: x + w - pad - state_w - scale_dpi(10, dpi),
+                    bottom: ry + row_h,
+                },
+                color: if matches!(state, PendingClip::Waiting) { COL_TEXT_SECONDARY } else { COL_TEXT_PRIMARY },
+                font_kind: FontKind::MonoClip,
+                flags: DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS,
+                clip_y: None,
+            });
+            text_cmds.push(TextDrawCmd {
+                text: label,
+                rect: Rect { left: x + w - pad - state_w, top: ry, right: x + w - pad, bottom: ry + row_h },
+                color,
+                font_kind: FontKind::Subtitle,
+                flags: DT_RIGHT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS,
+                clip_y: None,
+            });
+            ry += row_h;
+        }
+    }
+
     fn render_main_studio_view(
         st: &mut AppState,
         canvas: &mut Canvas<'_>,
@@ -2769,7 +2978,7 @@ mod win_gui {
         }
 
         // 3. Main Content Area (Empty Drop Zone vs Scrollable Mount Cards)
-        if st.mounts.is_empty() {
+        if st.mounts.is_empty() && st.pending.is_empty() {
             st.max_scroll_y = 0;
             st.scroll_y = 0;
             let margin = scale_dpi(18, dpi);
@@ -2834,7 +3043,8 @@ mod win_gui {
                 clip_y: None,
             });
 
-            let b_w1 = scale_dpi(190, dpi);
+            // Wide enough for "Browse .MLV / .mcraw / .braw Files..." (190 cut the text off).
+            let b_w1 = scale_dpi(290, dpi);
             let b_w2 = scale_dpi(145, dpi);
             let gap = scale_dpi(10, dpi);
             let total_bw = b_w1 + gap + b_w2;
@@ -2882,6 +3092,9 @@ mod win_gui {
             let card_pad = scale_dpi(12, dpi);
 
             let mut total_h = scale_dpi(16, dpi);
+            for p in &st.pending {
+                total_h += pending_card_height(p, dpi) + card_gap;
+            }
             for m in &st.mounts {
                 let ch = card_hdr_h + card_pad + table_hdr_h + (m.clips.len() as i32) * (clip_row_h + scale_dpi(4, dpi));
                 total_h += ch + card_gap;
@@ -2898,6 +3111,15 @@ mod win_gui {
             let list_hit_start = st.hit_boxes.len();
 
             let mut cur_y = content_top + scale_dpi(14, dpi) - st.scroll_y;
+            // Requests being indexed / queued, above the finished mounts.
+            for p in &st.pending {
+                let ph = pending_card_height(p, dpi);
+                if cur_y + ph >= content_top && cur_y <= content_bottom {
+                    render_pending_card(p, canvas, text_cmds, pad_x, cur_y, w - pad_x * 2, dpi);
+                }
+                cur_y += ph + card_gap;
+            }
+
             let num_mounts = st.mounts.len();
 
             for m_idx in 0..num_mounts {
@@ -3676,6 +3898,7 @@ mod win_gui {
                     resolve_fuscript_path: locate_resolve_fuscript(),
                     status_message: None,
                     mounts: Vec::new(),
+                    pending: Vec::new(),
                     scroll_y: 0,
                     max_scroll_y: 0,
                     hit_boxes: Vec::new(),

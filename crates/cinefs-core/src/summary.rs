@@ -189,11 +189,65 @@ pub fn mount_many(
     sources: &[std::path::PathBuf],
     mode: crate::DngPayloadMode,
 ) -> crate::Result<()> {
-    let mut first_err = None;
+    let files = expand_sources(sources);
+    mount_files_with_progress(vfs, &files, mode, |_, _| {})
+}
+
+/// Progress of one clip file while a selection is being mounted.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ClipLoad {
+    /// Being opened and indexed right now.
+    Loading,
+    /// Indexed; it will be part of the volume.
+    Ready,
+    /// Could not be opened (the message says why); the other clips are still mounted.
+    Failed(String),
+}
+
+/// Turns what the user picked into the clip files it contains, in the order they are mounted:
+/// a file stays as it is, a folder becomes its `.MLV` / `.mcraw` / `.braw` files (searched
+/// recursively, sorted by path). Used to list every clip before mounting starts, so the apps
+/// can show the whole selection with a per-clip status while it is indexed.
+pub fn expand_sources(sources: &[std::path::PathBuf]) -> Vec<std::path::PathBuf> {
+    let mut files = Vec::new();
     for s in sources {
-        if let Err(e) = vfs.mount_path(s, mode) {
-            crate::log::write("WARN", &format!("skipping '{}': {e}", s.display()));
-            first_err.get_or_insert(e);
+        if s.is_dir() {
+            match crate::vfs::collect_mlv_files_in_dir(s) {
+                Ok(mut found) => {
+                    found.sort();
+                    if found.is_empty() {
+                        crate::log::write("WARN", &format!("no clips found in folder '{}'", s.display()));
+                    }
+                    files.extend(found);
+                }
+                Err(e) => crate::log::write("WARN", &format!("cannot read folder '{}': {e}", s.display())),
+            }
+        } else {
+            files.push(s.clone());
+        }
+    }
+    files
+}
+
+/// Mounts clip `files` (see [`expand_sources`]) into `vfs` one after another, calling
+/// `on_progress(index, state)` as each file starts and finishes, so the apps can show live
+/// per-clip progress. Files that fail are skipped (and logged); errors only if none could be opened.
+pub fn mount_files_with_progress(
+    vfs: &mut CineFs,
+    files: &[std::path::PathBuf],
+    mode: crate::DngPayloadMode,
+    mut on_progress: impl FnMut(usize, ClipLoad),
+) -> crate::Result<()> {
+    let mut first_err = None;
+    for (i, f) in files.iter().enumerate() {
+        on_progress(i, ClipLoad::Loading);
+        match vfs.mount_mlv(f, mode) {
+            Ok(_) => on_progress(i, ClipLoad::Ready),
+            Err(e) => {
+                crate::log::write("WARN", &format!("skipping '{}': {e}", f.display()));
+                on_progress(i, ClipLoad::Failed(e.to_string()));
+                first_err.get_or_insert(e);
+            }
         }
     }
     if vfs.clips.is_empty() {
@@ -220,6 +274,35 @@ mod tests {
     fn mount_many_rejects_empty_selection() {
         let mut vfs = CineFs::new(64 * 1024 * 1024);
         assert!(mount_many(&mut vfs, &[], crate::DngPayloadMode::Auto).is_err());
+    }
+
+    #[test]
+    fn expand_sources_lists_folder_clips_in_order() {
+        let dir = std::env::temp_dir().join(format!("cinefs_expand_{}", std::process::id()));
+        let sub = dir.join("day2");
+        std::fs::create_dir_all(&sub).unwrap();
+        for p in [dir.join("B.MLV"), dir.join("a.mcraw"), dir.join("notes.txt"), sub.join("C.braw")] {
+            std::fs::write(&p, b"x").unwrap();
+        }
+        let loose = std::path::PathBuf::from("/somewhere/loose.MLV");
+        let files = expand_sources(&[loose.clone(), dir.clone()]);
+        let mut expected = vec![dir.join("B.MLV"), dir.join("a.mcraw"), sub.join("C.braw")];
+        expected.sort();
+        expected.insert(0, loose);
+        assert_eq!(files, expected);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn progress_reports_every_file_and_failures() {
+        let mut vfs = CineFs::new(64 * 1024 * 1024);
+        let files = vec![std::path::PathBuf::from("/does/not/exist.MLV")];
+        let mut events = Vec::new();
+        let res = mount_files_with_progress(&mut vfs, &files, crate::DngPayloadMode::Auto, |i, s| events.push((i, s)));
+        assert!(res.is_err());
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[0], (0, ClipLoad::Loading));
+        assert!(matches!(events[1], (0, ClipLoad::Failed(_))));
     }
 
     /// Opt-in end-to-end check on a real file: `CINEFS_TEST_MLV=/path/clip.mlv cargo test -p cinefs-core baked_dng_is_consistent -- --nocapture`.

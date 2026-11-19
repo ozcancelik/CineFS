@@ -15,6 +15,22 @@ CineFsMountHandle* cinefs_mount(
     char** out_error
 );
 
+/* Per-clip progress while mounting. event: 0 = clip listed (text = file path, sent for every
+   clip before indexing starts), 1 = indexing, 2 = ready, 3 = failed (text = reason).
+   text is only valid during the call; called on the mounting thread. */
+typedef void (*CineFsMountProgressFn)(void* ctx, uint32_t event, size_t index, size_t total, const char* text);
+
+/* Same as cinefs_mount, reporting per-clip progress through `progress` (may be NULL). */
+CineFsMountHandle* cinefs_mount_with_progress(
+    const char* source_paths,
+    const char* mount_point,
+    uint32_t mode,
+    size_t cache_mb,
+    char** out_error,
+    CineFsMountProgressFn progress,
+    void* ctx
+);
+
 const char* cinefs_mount_summary_json(const CineFsMountHandle* handle);
 
 void cinefs_mount_cache_stats(
