@@ -146,6 +146,12 @@ final class ActiveMountItem: Identifiable, ObservableObject {
     // Hover scrubbing: frames are quantised to `scrubBuckets` positions per clip so they can be cached,
     // and only the newest request decodes (older ones that waited on the lock are dropped).
     static let scrubBuckets = 48
+
+    /// Frame shown for scrub position `bucket` (clicking the preview starts playback there).
+    static func scrubFrame(bucket: Int, frameCount: Int) -> Int {
+        let n = max(1, min(frameCount, scrubBuckets))
+        return n > 1 ? bucket * (frameCount - 1) / (n - 1) : 0
+    }
     private let genLock = NSLock()
     private var latestScrub = 0
     private var scrubCache: [Int: NSImage] = [:]
@@ -177,8 +183,7 @@ final class ActiveMountItem: Identifiable, ObservableObject {
         let key = clip * 1000 + bucket
         if let img = scrubCache[key] { return img }
         if !isLatestScrub(token) { return nil }
-        let n = max(1, min(frameCount, ActiveMountItem.scrubBuckets))
-        let frame = n > 1 ? bucket * (frameCount - 1) / (n - 1) : 0
+        let frame = ActiveMountItem.scrubFrame(bucket: bucket, frameCount: frameCount)
         var w: UInt32 = 0
         var h: UInt32 = 0
         guard let buf = cinefs_clip_frame_preview(handle, clip, frame, 320, &w, &h),
@@ -241,6 +246,7 @@ struct PlayerSurface: NSViewRepresentable {
 final class PlayerController: ObservableObject {
     private weak var item: ActiveMountItem?
     private let clipIndex: Int
+    private let startFrame: Int
     let title: String
     private var player: OpaquePointer?
     private var timer: Timer?
@@ -271,9 +277,10 @@ final class PlayerController: ObservableObject {
         if let p = player { cinefs_player_set_volume(p, muted ? 0 : Float(volume)) }
     }
 
-    init(item: ActiveMountItem, clipIndex: Int, title: String) {
+    init(item: ActiveMountItem, clipIndex: Int, title: String, startFrame: Int = 0) {
         self.item = item
         self.clipIndex = clipIndex
+        self.startFrame = startFrame
         self.title = title
     }
 
@@ -292,6 +299,7 @@ final class PlayerController: ObservableObject {
             return
         }
         cinefs_player_set_loop(player, 1)
+        if startFrame > 0 { cinefs_player_seek(player, Double(startFrame)) }
         hasAudio = cinefs_player_has_audio(player) != 0
         applyVolume()
         let t = Timer(timeInterval: 1.0 / 120.0, repeats: true) { [weak self] _ in
@@ -438,8 +446,8 @@ final class PlayerWindows: NSObject, NSWindowDelegate {
     static let shared = PlayerWindows()
     private var entries: [(window: NSWindow, controller: PlayerController, mountID: UUID)] = []
 
-    func open(item: ActiveMountItem, clipIndex: Int, title: String) {
-        let controller = PlayerController(item: item, clipIndex: clipIndex, title: title)
+    func open(item: ActiveMountItem, clipIndex: Int, title: String, startFrame: Int = 0) {
+        let controller = PlayerController(item: item, clipIndex: clipIndex, title: title, startFrame: startFrame)
         let win = NSWindow(
             contentRect: NSRect(x: 0, y: 0, width: 1280, height: 760),
             styleMask: [.titled, .closable, .resizable, .miniaturizable],
@@ -1185,6 +1193,7 @@ struct ClipThumbView: View {
     let item: ActiveMountItem
     let index: Int
     let frameCount: Int
+    let title: String
     @State private var image: NSImage?
     @State private var failed = false
     @State private var scrubImage: NSImage?
@@ -1207,6 +1216,17 @@ struct ClipThumbView: View {
             } else {
                 ProgressView().controlSize(.mini).frame(width: slotW, height: slotH)
             }
+            if hoverFrac != nil {
+                // Small translucent play badge: says "click to play" without hiding the frame.
+                Image(systemName: "play.fill")
+                    .font(.system(size: 9, weight: .bold))
+                    .foregroundStyle(.white.opacity(0.92))
+                    .offset(x: 1)
+                    .frame(width: 22, height: 22)
+                    .background(Circle().fill(Color.black.opacity(0.5)))
+                    .frame(width: slotW, height: slotH)
+                    .allowsHitTesting(false)
+            }
             if let f = hoverFrac {
                 Rectangle()
                     .fill(Color.accentColor)
@@ -1215,6 +1235,12 @@ struct ClipThumbView: View {
         }
         .frame(width: slotW, height: slotH)
         .clipShape(RoundedRectangle(cornerRadius: 3))
+        .contentShape(Rectangle())
+        .onTapGesture {
+            // Play from the frame the preview is scrubbed to (from the start when not scrubbed).
+            let start = lastBucket >= 0 ? ActiveMountItem.scrubFrame(bucket: lastBucket, frameCount: frameCount) : 0
+            PlayerWindows.shared.open(item: item, clipIndex: index, title: title, startFrame: start)
+        }
         .onContinuousHover { phase in
             switch phase {
             case .active(let p):
@@ -1235,7 +1261,7 @@ struct ClipThumbView: View {
             let img = await Task.detached(priority: .utility) { it.thumbnail(index: i) }.value
             if let img { image = img } else { failed = true }
         }
-        .help("Preview — move the mouse across it to scrub through the clip (Rec.709, as-shot white balance; not a graded render)")
+        .help("Preview — move the mouse across it to scrub, click to play from there (Rec.709, as-shot white balance; not a graded render)")
     }
 
     private func scrub(to f: CGFloat) {
@@ -1262,6 +1288,10 @@ struct ClipTableView: View {
     @ObservedObject var item: ActiveMountItem
     @ObservedObject var manager = MountManager.shared
 
+    private func clipPath(_ folder: String) -> String {
+        (item.summary.mountPoint as NSString).appendingPathComponent(folder)
+    }
+
     private func stretchText(_ v: Double) -> String {
         v == v.rounded() ? "×\(Int(v))" : String(format: "×%.2f", v)
     }
@@ -1285,7 +1315,7 @@ struct ClipTableView: View {
                 header("Stretch").frame(width: 56)
                 header("Audio", .center).frame(width: 40)
                 header("Mode", .leading).frame(width: 118)
-                Color.clear.frame(width: 54, height: 1)
+                Color.clear.frame(width: 24, height: 1)
             }
             .padding(.bottom, 6)
 
@@ -1293,14 +1323,21 @@ struct ClipTableView: View {
 
             ForEach(Array(item.summary.clips.enumerated()), id: \.element.id) { idx, clip in
                 GridRow {
-                    ClipThumbView(item: item, index: idx, frameCount: clip.frameCount)
+                    ClipThumbView(item: item, index: idx, frameCount: clip.frameCount, title: clip.folderName)
 
-                    Text(clip.folderName)
-                        .font(.system(size: 12, design: .monospaced))
-                        .lineLimit(1)
-                        .truncationMode(.middle)
-                        .frame(minWidth: 140, maxWidth: .infinity, alignment: .leading)
-                        .help(clip.folderName)
+                    // Clicking the name opens the clip folder (same as Windows).
+                    Button {
+                        manager.revealInFinder(path: clipPath(clip.folderName))
+                    } label: {
+                        Text(clip.folderName)
+                            .font(.system(size: 12, design: .monospaced))
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+                            .frame(minWidth: 140, maxWidth: .infinity, alignment: .leading)
+                            .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .help("\(clip.folderName) — click to show the clip folder in Finder")
 
                     Text("\(clip.width)×\(clip.height)")
                         .frame(width: 84, alignment: .trailing)
@@ -1343,30 +1380,33 @@ struct ClipTableView: View {
                         ? "Focus pixels (PDAF dots) corrected: \(clip.focusPixels) pixels per frame, learned from the clip. Pixels are rewritten, so LJ92 passthrough is not used."
                         : "DNG payload mode")
 
-                    HStack(spacing: 8) {
-                        Button {
-                            PlayerWindows.shared.open(item: item, clipIndex: idx, title: clip.folderName)
-                        } label: {
-                            Image(systemName: "play.rectangle")
-                        }
-                        .buttonStyle(.borderless)
-                        .help("Play this clip in the CineFS player (full resolution, GPU)")
-
-                        Button {
-                            manager.sendToResolve(item: item, specificClipFolder: clip.folderName)
-                        } label: {
-                            Image(systemName: "plus.rectangle.on.folder")
-                        }
-                        .buttonStyle(.borderless)
-                        .help("Import only this clip into DaVinci Resolve Media Pool")
-                        .disabled(manager.isImportingToResolve)
+                    Button {
+                        manager.sendToResolve(item: item, specificClipFolder: clip.folderName)
+                    } label: {
+                        Image(systemName: "plus.rectangle.on.folder")
                     }
-                    .frame(width: 54)
+                    .buttonStyle(.borderless)
+                    .help("Import only this clip into DaVinci Resolve Media Pool")
+                    .disabled(manager.isImportingToResolve)
+                    .frame(width: 24)
                 }
                 .font(.system(size: 12))
                 .monospacedDigit()
                 .padding(.vertical, 5)
                 .background(idx % 2 == 1 ? Color.primary.opacity(0.03) : Color.clear)
+                .contextMenu {
+                    // Keyboard / VoiceOver path to what the preview click does.
+                    Button("Play") {
+                        PlayerWindows.shared.open(item: item, clipIndex: idx, title: clip.folderName)
+                    }
+                    Button("Import to DaVinci Resolve") {
+                        manager.sendToResolve(item: item, specificClipFolder: clip.folderName)
+                    }
+                    .disabled(manager.isImportingToResolve)
+                    Button("Show in Finder") {
+                        manager.revealInFinder(path: clipPath(clip.folderName))
+                    }
+                }
 
                 if idx < item.summary.clips.count - 1 {
                     Divider().opacity(0.4).gridCellColumns(10)

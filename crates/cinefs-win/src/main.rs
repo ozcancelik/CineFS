@@ -202,6 +202,82 @@ mod win_gui {
         }
     }
 
+    // Footer settings menus (same choices as the macOS footer pickers).
+    const ID_BAKE_ON: usize = 310;
+    const ID_BAKE_OFF: usize = 311;
+    const ID_FOCUS_ON: usize = 320;
+    const ID_FOCUS_OFF: usize = 321;
+    /// `ID_OVERRIDE_BASE + stretch mode` (0..=4).
+    const ID_OVERRIDE_BASE: usize = 330;
+
+    /// Short label for the footer Override button (the menu uses [`stretch_mode_label`]).
+    fn stretch_mode_short(m: u8) -> &'static str {
+        match m {
+            1 => "Off",
+            2 => "Horizontal ×3",
+            3 => "Vertical ×1.67",
+            4 => "Vertical ×3",
+            _ => "Auto",
+        }
+    }
+
+    unsafe fn apply_stretch_bake(hwnd: *mut c_void, on: bool) {
+        cinefs_core::dng::set_stretch_bake(on);
+        persist_settings();
+        set_status(
+            hwnd,
+            format!(
+                "Stretch method: {} — applies to clips mounted from now on.",
+                if on { "baked into the DNG pixels" } else { "metadata (DefaultScale) only" }
+            ),
+            false,
+        );
+    }
+
+    unsafe fn apply_focus_fix(hwnd: *mut c_void, on: bool) {
+        cinefs_core::focus_fix::set_focus_fix(on);
+        persist_settings();
+        set_status(
+            hwnd,
+            format!(
+                "Focus pixels: {} — applies to clips mounted from now on.",
+                if on { "PDAF dots are corrected (pixels rewritten, no LJ92 passthrough)" } else { "off" }
+            ),
+            false,
+        );
+    }
+
+    unsafe fn apply_stretch_mode(hwnd: *mut c_void, mode: u8) {
+        STRETCH_MODE.store(mode, std::sync::atomic::Ordering::Relaxed);
+        cinefs_core::mlv::set_stretch_override(stretch_override_for(mode));
+        persist_settings();
+        set_status(
+            hwnd,
+            format!(
+                "Pixel stretch: {} — applies to clips mounted from now on (unmount + mount again to change existing ones).",
+                stretch_mode_label(mode)
+            ),
+            false,
+        );
+    }
+
+    /// Popup menu of `(command id, label, checked)` choices under `btn_rect` (client coordinates).
+    unsafe fn show_choice_popup(hwnd: *mut c_void, btn_rect: Rect, items: &[(usize, &str, bool)]) {
+        let menu = CreatePopupMenu();
+        if menu.is_null() {
+            return;
+        }
+        for &(id, label, checked) in items {
+            let lw = wstr(label);
+            AppendMenuW(menu, if checked { MF_STRING | MF_CHECKED } else { MF_STRING }, id, lw.as_ptr());
+        }
+        // Opens upwards: the buttons sit in the footer at the bottom of the window.
+        let mut pt = Point { x: btn_rect.left, y: btn_rect.top - 4 };
+        ClientToScreen(hwnd, &mut pt);
+        TrackPopupMenu(menu, TPM_LEFTALIGN | TPM_BOTTOMALIGN, pt.x, pt.y, 0, hwnd, ptr::null());
+        DestroyMenu(menu);
+    }
+
     const ID_MODE_AUTO: usize = 300;
     const ID_MODE_PASSTHROUGH: usize = 301;
     const ID_MODE_NATIVE: usize = 302;
@@ -578,6 +654,17 @@ mod win_gui {
     const THUMB_W: i32 = 96;
     const THUMB_H: i32 = 54;
     const THUMB_GAP: i32 = 10;
+    /// Left inset of the preview inside a clip row (DIPs).
+    const ROW_INSET: i32 = 8;
+    /// Width of the per-clip action column at the end of a row (Resolve import icon), DIPs.
+    const ROW_ACTION_W: i32 = 30;
+    /// Left edge of the CLIP (name) column, relative to the row (DIPs).
+    const CLIP_NAME_X: i32 = ROW_INSET + THUMB_W + THUMB_GAP;
+
+    /// Right edge of the numeric table columns: leaves room for the per-clip action column.
+    fn table_right(row_right: i32, dpi: i32) -> i32 {
+        row_right - scale_dpi(12 + ROW_ACTION_W + 10, dpi)
+    }
 
     const COL_DROP_BG: u32 = 0x16171A;
     const COL_DROP_BORDER: u32 = 0x34363D;
@@ -867,6 +954,37 @@ mod win_gui {
                 }
             }
         }
+
+        /// Draws an anti-aliased right-pointing "play" triangle centred on (`cx`, `cy`);
+        /// `s` is half its height.
+        fn fill_play_triangle(&mut self, cx: f32, cy: f32, s: f32, color: u32, alpha: u32) {
+            let (ax, ay) = (cx - 0.75 * s, cy - s);
+            let (bx, by) = (cx - 0.75 * s, cy + s);
+            let (tx, ty) = (cx + 1.0 * s, cy);
+            let edge = |x0: f32, y0: f32, x1: f32, y1: f32, x: f32, y: f32| (x1 - x0) * (y - y0) - (y1 - y0) * (x - x0);
+            const N: i32 = 4; // 4x4 supersampling for the edges
+            for py in (ay.floor() as i32 - 1)..=(by.ceil() as i32 + 1) {
+                for px in (ax.floor() as i32 - 1)..=(tx.ceil() as i32 + 1) {
+                    let mut hits = 0u32;
+                    for sy in 0..N {
+                        for sx in 0..N {
+                            let x = px as f32 + (sx as f32 + 0.5) / N as f32;
+                            let y = py as f32 + (sy as f32 + 0.5) / N as f32;
+                            // Inside when all three edge functions are >= 0 (y points down).
+                            if edge(ax, ay, tx, ty, x, y) >= 0.0
+                                && edge(tx, ty, bx, by, x, y) >= 0.0
+                                && edge(bx, by, ax, ay, x, y) >= 0.0
+                            {
+                                hits += 1;
+                            }
+                        }
+                    }
+                    if hits > 0 {
+                        self.blend_pixel(px, py, color, alpha * hits / (N * N) as u32);
+                    }
+                }
+            }
+        }
     }
 
     // =========================================================================
@@ -886,9 +1004,15 @@ mod win_gui {
         CardResolve(usize),
         CardUnmount(usize),
         ClipExplorer(usize, usize),
-        ClipPlay(usize, usize),
-        /// Clip preview image: hovering scrubs through the clip, clicking plays it.
+        /// Import only this clip into the Resolve Media Pool (icon at the end of the row).
+        ClipResolve(usize, usize),
+        /// Clip preview image: hovering scrubs through the clip and shows a play badge; clicking
+        /// plays it from the scrubbed frame.
         ClipThumb(usize, usize),
+        /// Footer settings menus (applied to the next mount), like the macOS footer pickers.
+        StretchMethodMenu,
+        FocusPixelsMenu,
+        StretchOverrideMenu,
         // Setup Wizard mode actions
         SetupToggleDesktopIcon,
         SetupToggleContextMenu,
@@ -2787,7 +2911,9 @@ mod win_gui {
         // Drop cached clip previews of mounts that are gone.
         let live_ids: Vec<u64> = st.mounts.iter().map(|m| m.id).collect();
         thumbs::retain_mounts(&live_ids);
-        let footer_h = scale_dpi(46, dpi);
+        // Two footer rows: next-mount settings on top, the usual controls below.
+        let settings_h = scale_dpi(36, dpi);
+        let footer_h = settings_h + scale_dpi(46, dpi);
         let pad_x = scale_dpi(18, dpi);
 
         // 1. Header Bar
@@ -3282,7 +3408,7 @@ mod win_gui {
                     {
                         let hx = card_x + scale_dpi(14, dpi);
                         let hw = card_w - scale_dpi(28, dpi);
-                        let cols = table_cols(hx + hw - scale_dpi(12, dpi), dpi);
+                        let cols = table_cols(table_right(hx + hw, dpi), dpi);
                         let labels: [(&str, u32); 7] = [
                             ("MODE", DT_LEFT),
                             ("AUDIO", DT_CENTER),
@@ -3305,7 +3431,7 @@ mod win_gui {
                         text_cmds.push(TextDrawCmd {
                             text: String::from("CLIP"),
                             rect: Rect {
-                                left: hx + scale_dpi(26 + THUMB_W + THUMB_GAP, dpi),
+                                left: hx + scale_dpi(CLIP_NAME_X, dpi),
                                 top: ry,
                                 right: cols[6].0 - scale_dpi(10, dpi),
                                 bottom: ry + table_hdr_h,
@@ -3336,35 +3462,12 @@ mod win_gui {
                             );
                         }
 
-                        // Play button (opens the GPU player for this clip)
-                        let play_action = HitAction::ClipPlay(m_idx, c_idx);
-                        let play_hover = st.hovered_action.as_ref() == Some(&play_action);
-                        let tri_cx = (rx + scale_dpi(14, dpi)) as f32;
-                        let tri_cy = (ry + clip_row_h / 2) as f32;
-                        let tri = scale_dpi(5, dpi) as f32;
-                        let tri_col = if play_hover { COL_ACCENT } else { COL_TEXT_SECONDARY };
-                        // Filled triangle drawn as stacked vertical strokes (the canvas has no polygon fill).
-                        let steps = (tri * 2.0).ceil() as i32;
-                        for k in 0..=steps {
-                            let x = tri_cx - tri * 0.8 + k as f32 * (tri * 1.8 / steps as f32);
-                            let half = tri * (1.0 - k as f32 / steps as f32);
-                            canvas.draw_line(x, tri_cy - half, x, tri_cy + half, 1.2, tri_col);
-                        }
-                        st.hit_boxes.push(HitBox {
-                            rect: Rect {
-                                left: rx,
-                                top: ry,
-                                right: rx + scale_dpi(26, dpi),
-                                bottom: ry + clip_row_h,
-                            },
-                            action: play_action,
-                        });
-
-                        // Clip preview (middle frame; hover to scrub, click to play), like macOS.
+                        // Clip preview (middle frame): hover scrubs and shows a play badge, click
+                        // plays from the scrubbed frame. Same as macOS.
                         {
                             let tw = scale_dpi(THUMB_W, dpi);
                             let th = scale_dpi(THUMB_H, dpi);
-                            let tx = rx + scale_dpi(26, dpi);
+                            let tx = rx + scale_dpi(ROW_INSET, dpi);
                             let ty = ry + (clip_row_h - th) / 2;
                             canvas.draw_rounded_rect(tx, ty, tw, th, scale_dpi(3, dpi) as f32, COL_THUMB_BG, 255, None);
                             let mount_id = st.mounts[m_idx].id;
@@ -3400,6 +3503,15 @@ mod win_gui {
                                     clip_y: None,
                                 });
                             }
+                            if hover_frac.is_some() {
+                                // Small translucent play badge: says "click to play" without
+                                // hiding the scrubbed frame.
+                                let bcx = (tx + tw / 2) as f32;
+                                let bcy = (ty + th / 2) as f32;
+                                canvas.fill_circle(bcx, bcy, scale_dpi(11, dpi) as f32, 0x000000, 130);
+                                let s = scale_dpi(5, dpi) as f32;
+                                canvas.fill_play_triangle(bcx + s * 0.15, bcy, s, 0xFFFFFF, 235);
+                            }
                             if let Some(f) = hover_frac {
                                 // Scrub position bar along the bottom edge.
                                 let bar_w = ((tw as f32 * f).round() as i32).max(scale_dpi(2, dpi));
@@ -3412,7 +3524,7 @@ mod win_gui {
                         }
 
                         // Table cells (same column geometry as the header row)
-                        let cols = table_cols(rx + rw - scale_dpi(12, dpi), dpi);
+                        let cols = table_cols(table_right(rx + rw, dpi), dpi);
                         let p_h = scale_dpi(20, dpi);
                         let p_y = ry + (clip_row_h - p_h) / 2;
                         let cell = |text: String, col: (i32, i32), color: u32, flags: u32| TextDrawCmd {
@@ -3502,7 +3614,7 @@ mod win_gui {
 
                         // Clip Folder Name (clickable to open clip folder directly in Explorer)
                         let folder_rc = Rect {
-                            left: rx + scale_dpi(26 + THUMB_W + THUMB_GAP, dpi),
+                            left: rx + scale_dpi(CLIP_NAME_X, dpi),
                             top: ry,
                             right: cols[6].0 - scale_dpi(10, dpi),
                             bottom: ry + clip_row_h,
@@ -3519,6 +3631,29 @@ mod win_gui {
                             rect: folder_rc,
                             action: HitAction::ClipExplorer(m_idx, c_idx),
                         });
+
+                        // Import only this clip into Resolve (end of the row, like macOS).
+                        {
+                            let action = HitAction::ClipResolve(m_idx, c_idx);
+                            let hover = st.hovered_action.as_ref() == Some(&action);
+                            let right = rx + rw - scale_dpi(12, dpi);
+                            let aw = scale_dpi(ROW_ACTION_W, dpi);
+                            let ah = scale_dpi(26, dpi);
+                            let (ax, ay) = (right - aw, ry + (clip_row_h - ah) / 2);
+                            if hover {
+                                canvas.draw_rounded_rect(ax, ay, aw, ah, scale_dpi(5, dpi) as f32, COL_BTN_SEC_HOVER, 255, None);
+                            }
+                            let col = if hover { COL_ACCENT } else { COL_TEXT_SECONDARY };
+                            // Media-pool card with a "+" (macOS: plus.rectangle.on.folder).
+                            let (iw, ih) = (scale_dpi(16, dpi), scale_dpi(12, dpi));
+                            let (ix, iy) = (ax + (aw - iw) / 2, ay + (ah - ih) / 2);
+                            canvas.draw_rounded_rect(ix, iy, iw, ih, scale_dpi(2, dpi) as f32, 0, 0, Some((col, 1.3)));
+                            let (pcx, pcy) = ((ix + iw / 2) as f32, (iy + ih / 2) as f32);
+                            let arm = scale_dpi(3, dpi) as f32;
+                            canvas.draw_line(pcx - arm, pcy, pcx + arm, pcy, 1.4, col);
+                            canvas.draw_line(pcx, pcy - arm, pcx, pcy + arm, 1.4, col);
+                            st.hit_boxes.push(HitBox { rect: Rect { left: ax, top: ay, right: ax + aw, bottom: ay + ah }, action });
+                        }
 
                         ry += clip_row_h + scale_dpi(4, dpi);
                     }
@@ -3550,10 +3685,42 @@ mod win_gui {
         canvas.fill_rect(0, fy, w, footer_h, COL_FOOTER_BG);
         canvas.fill_rect(0, fy, w, 1, COL_DIVIDER);
 
+        // Settings row (top of the footer): the same three "applies to the next mount" choices
+        // as the macOS footer pickers. Each button opens a menu with the options.
+        {
+            let sh = scale_dpi(26, dpi);
+            let sy = fy + (settings_h - sh) / 2 + scale_dpi(2, dpi);
+            let gap = scale_dpi(8, dpi);
+            let bake = cinefs_core::dng::stretch_bake();
+            let focus = cinefs_core::focus_fix::focus_fix_enabled();
+            let mode = STRETCH_MODE.load(std::sync::atomic::Ordering::Relaxed);
+            let buttons = [
+                (format!("Stretch: {}", if bake { "Baked into DNG" } else { "Metadata only" }), 172, HitAction::StretchMethodMenu),
+                (format!("Focus pixels: {}", if focus { "Fix" } else { "Off" }), 132, HitAction::FocusPixelsMenu),
+                (format!("Override: {}", stretch_mode_short(mode)), 176, HitAction::StretchOverrideMenu),
+            ];
+            let mut x = pad_x;
+            for (label, bw, action) in buttons {
+                let rc = Rect { left: x, top: sy, right: x + scale_dpi(bw, dpi), bottom: sy + sh };
+                render_button(st, canvas, text_cmds, rc, &label, action, BtnStyle::Secondary, dpi);
+                x = rc.right + gap;
+            }
+            text_cmds.push(TextDrawCmd {
+                text: String::from("Applies to the next mount"),
+                rect: Rect { left: x + scale_dpi(4, dpi), top: sy, right: w - pad_x, bottom: sy + sh },
+                color: COL_TEXT_MUTED,
+                font_kind: FontKind::Subtitle,
+                flags: DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS,
+                clip_y: None,
+            });
+        }
+        let main_y = fy + settings_h;
+        let main_h = footer_h - settings_h;
+
         // Checkbox: "Open in Explorer on mount"
         let cb_sz = scale_dpi(18, dpi);
         let cb_x = pad_x;
-        let cb_y = fy + (footer_h - cb_sz) / 2;
+        let cb_y = main_y + (main_h - cb_sz) / 2;
         canvas.draw_rounded_rect(
             cb_x,
             cb_y,
@@ -3595,7 +3762,7 @@ mod win_gui {
         }
         let cb_hit = Rect {
             left: cb_x,
-            top: fy + scale_dpi(6, dpi),
+            top: main_y + scale_dpi(6, dpi),
             right: cb_x + scale_dpi(185, dpi),
             bottom: h - scale_dpi(6, dpi),
         };
@@ -3620,9 +3787,9 @@ mod win_gui {
         let res_btn_h = scale_dpi(26, dpi);
         let res_btn_rc = Rect {
             left: cb_hit.right + scale_dpi(8, dpi),
-            top: fy + (footer_h - res_btn_h) / 2,
+            top: main_y + (main_h - res_btn_h) / 2,
             right: cb_hit.right + scale_dpi(8, dpi) + res_btn_w,
-            bottom: fy + (footer_h - res_btn_h) / 2 + res_btn_h,
+            bottom: main_y + (main_h - res_btn_h) / 2 + res_btn_h,
         };
         let has_resolve =
             st.resolve_fuscript_path.is_some() || locate_resolve_fuscript().is_some();
@@ -3700,7 +3867,7 @@ mod win_gui {
             text: summary_txt,
             rect: Rect {
                 left: wf_btn_rc.right + scale_dpi(8, dpi),
-                top: fy,
+                top: main_y,
                 right: right_limit,
                 bottom: h,
             },
@@ -3712,11 +3879,6 @@ mod win_gui {
     }
 
     unsafe fn dispatch_hit_action(hwnd: *mut c_void, action: HitAction) {
-        // Clicking a clip preview plays the clip, like the play button next to it.
-        let action = match action {
-            HitAction::ClipThumb(m, c) => HitAction::ClipPlay(m, c),
-            other => other,
-        };
         match action {
             HitAction::AddFile => open_file_dialog(hwnd),
             HitAction::AddFolder => open_folder_dialog(hwnd),
@@ -3807,23 +3969,72 @@ mod win_gui {
                     open_path_in_explorer(&p, "clip-button");
                 }
             }
-            HitAction::ClipThumb(..) => {} // mapped to ClipPlay above
-            HitAction::ClipPlay(m_idx, c_idx) => {
+            HitAction::ClipResolve(m_idx, c_idx) => import_to_resolve(hwnd, Some(m_idx), Some(c_idx)),
+            HitAction::StretchMethodMenu | HitAction::FocusPixelsMenu | HitAction::StretchOverrideMenu => {
+                let rect = {
+                    let Ok(guard) = APP_STATE.lock() else {
+                        return;
+                    };
+                    guard.as_ref().and_then(|st| st.hit_boxes.iter().find(|h| h.action == action).map(|h| h.rect))
+                };
+                let Some(rc) = rect else {
+                    return;
+                };
+                match action {
+                    HitAction::StretchMethodMenu => {
+                        let bake = cinefs_core::dng::stretch_bake();
+                        show_choice_popup(
+                            hwnd,
+                            rc,
+                            &[
+                                (ID_BAKE_ON, "Baked into DNG pixels (works in every app)", bake),
+                                (ID_BAKE_OFF, "Metadata only (DefaultScale tag, fast)", !bake),
+                            ],
+                        );
+                    }
+                    HitAction::FocusPixelsMenu => {
+                        let on = cinefs_core::focus_fix::focus_fix_enabled();
+                        show_choice_popup(
+                            hwnd,
+                            rc,
+                            &[
+                                (ID_FOCUS_ON, "Fix PDAF dots (EOS M / 100D / 650D / 700D)", on),
+                                (ID_FOCUS_OFF, "Off", !on),
+                            ],
+                        );
+                    }
+                    _ => {
+                        let cur = STRETCH_MODE.load(std::sync::atomic::Ordering::Relaxed);
+                        let items: Vec<(usize, &str, bool)> =
+                            (0u8..5).map(|m| (ID_OVERRIDE_BASE + m as usize, stretch_mode_label(m), m == cur)).collect();
+                        show_choice_popup(hwnd, rc, &items);
+                    }
+                }
+            }
+            HitAction::ClipThumb(m_idx, c_idx) => {
+                // Plays from the frame the preview is scrubbed to (the middle frame is what the
+                // preview shows otherwise, but playback then starts at the beginning).
                 let target = {
                     let Ok(guard) = APP_STATE.lock() else {
                         return;
                     };
-                    guard.as_ref().and_then(|st| st.mounts.get(m_idx)).map(|m| {
+                    guard.as_ref().and_then(|st| {
+                        let m = st.mounts.get(m_idx)?;
                         let title = m
                             .clip_folders
                             .get(c_idx)
                             .cloned()
                             .unwrap_or_else(|| format!("Clip {}", c_idx + 1));
-                        (m.vfs.clone(), title)
+                        let frames = m.vfs.clips.get(c_idx).map_or(0, |k| k.clip.frames.len());
+                        let start = match st.scrub_hover {
+                            Some((hm, hc, f)) if hm == m_idx && hc == c_idx => thumbs::scrub_frame_index(f, frames),
+                            _ => 0,
+                        };
+                        Some((m.vfs.clone(), title, start))
                     })
                 };
-                if let Some((vfs, title)) = target {
-                    if let Err(e) = player_win::open(vfs, c_idx, &title) {
+                if let Some((vfs, title, start)) = target {
+                    if let Err(e) = player_win::open(vfs, c_idx, &title, start) {
                         cinefs_core::log_warn!("player: {e}");
                         set_status(hwnd, format!("Could not open the player: {e}"), true);
                     }
@@ -4181,45 +4392,15 @@ mod win_gui {
                     }
                     ID_TRAY_RESOLVE_ALL => import_to_resolve(hwnd, None, None),
                     ID_TRAY_UNMOUNT_ALL => unmount_all(hwnd),
-                    ID_TRAY_BAKE => {
-                        let on = !cinefs_core::dng::stretch_bake();
-                        cinefs_core::dng::set_stretch_bake(on);
-                        persist_settings();
-                        set_status(
-                            hwnd,
-                            format!(
-                                "Stretch method: {} — applies to clips mounted from now on.",
-                                if on { "baked into the DNG pixels" } else { "metadata (DefaultScale) only" }
-                            ),
-                            false,
-                        );
-                    }
-                    ID_TRAY_FOCUS => {
-                        let on = !cinefs_core::focus_fix::focus_fix_enabled();
-                        cinefs_core::focus_fix::set_focus_fix(on);
-                        persist_settings();
-                        set_status(
-                            hwnd,
-                            format!(
-                                "Focus pixels: {} — applies to clips mounted from now on.",
-                                if on { "PDAF dots are corrected (pixels rewritten, no LJ92 passthrough)" } else { "off" }
-                            ),
-                            false,
-                        );
-                    }
+                    ID_TRAY_BAKE => apply_stretch_bake(hwnd, !cinefs_core::dng::stretch_bake()),
+                    ID_TRAY_FOCUS => apply_focus_fix(hwnd, !cinefs_core::focus_fix::focus_fix_enabled()),
                     ID_TRAY_STRETCH => {
-                        let next = (STRETCH_MODE.load(std::sync::atomic::Ordering::Relaxed) + 1) % 5;
-                        STRETCH_MODE.store(next, std::sync::atomic::Ordering::Relaxed);
-                        cinefs_core::mlv::set_stretch_override(stretch_override_for(next));
-                        persist_settings();
-                        set_status(
-                            hwnd,
-                            format!(
-                                "Pixel stretch: {} — applies to clips mounted from now on (unmount + mount again to change existing ones).",
-                                stretch_mode_label(next)
-                            ),
-                            false,
-                        );
+                        apply_stretch_mode(hwnd, (STRETCH_MODE.load(std::sync::atomic::Ordering::Relaxed) + 1) % 5)
+                    }
+                    ID_BAKE_ON | ID_BAKE_OFF => apply_stretch_bake(hwnd, id == ID_BAKE_ON),
+                    ID_FOCUS_ON | ID_FOCUS_OFF => apply_focus_fix(hwnd, id == ID_FOCUS_ON),
+                    _ if (ID_OVERRIDE_BASE..ID_OVERRIDE_BASE + 5).contains(&id) => {
+                        apply_stretch_mode(hwnd, (id - ID_OVERRIDE_BASE) as u8)
                     }
                     ID_TRAY_OPEN_LOG => {
                         let lp = cinefs_core::log::active_path()

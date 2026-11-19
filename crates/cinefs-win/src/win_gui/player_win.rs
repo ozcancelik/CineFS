@@ -142,8 +142,9 @@ unsafe fn register_classes() {
     }
 }
 
-/// Opens a player for clip `clip_index` of `vfs`. Errors are returned for the status banner.
-pub(super) unsafe fn open(vfs: Arc<CineFs>, clip_index: usize, title: &str) -> Result<(), String> {
+/// Opens a player for clip `clip_index` of `vfs`, starting at `start_frame` (the frame the clip
+/// preview was scrubbed to). Errors are returned for the status banner.
+pub(super) unsafe fn open(vfs: Arc<CineFs>, clip_index: usize, title: &str, start_frame: usize) -> Result<(), String> {
     let clip: Arc<MountedClip> = vfs.clips.get(clip_index).cloned().ok_or("clip index out of range")?;
     register_classes();
     let h_inst = GetModuleHandleW(ptr::null());
@@ -217,6 +218,9 @@ pub(super) unsafe fn open(vfs: Arc<CineFs>, clip_index: usize, title: &str) -> R
         }
     };
     player.engine.set_looping(true);
+    if start_frame > 0 {
+        player.engine.seek(start_frame as f64);
+    }
 
     let prefs = crate::settings::Settings::load(&settings_path());
     let has_audio = player.has_audio();

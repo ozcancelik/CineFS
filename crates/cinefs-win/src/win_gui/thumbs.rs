@@ -149,6 +149,18 @@ pub fn scrub_bucket(frac: f32, frame_count: usize) -> usize {
     ((frac.clamp(0.0, 1.0) * n as f32) as usize).min(n - 1)
 }
 
+/// Frame shown for scrub position `bucket` of a clip with `frame_count` frames.
+fn bucket_frame(bucket: usize, frame_count: usize) -> usize {
+    let n = frame_count.clamp(1, SCRUB_BUCKETS);
+    if n > 1 { bucket * (frame_count - 1) / (n - 1) } else { 0 }
+}
+
+/// Frame the preview shows while the mouse is at `frac` (0..1): clicking the preview starts
+/// playback there.
+pub fn scrub_frame_index(frac: f32, frame_count: usize) -> usize {
+    bucket_frame(scrub_bucket(frac, frame_count), frame_count)
+}
+
 /// Frame to show while the mouse is at `frac` (0..1) across the preview of `clip`: the cached
 /// image if it is ready, otherwise `None` (the request is queued; the window is repainted when
 /// the frame is ready, and the caller keeps showing the list preview meanwhile).
@@ -157,7 +169,6 @@ pub fn scrub_frame(key: ClipKey, clip: &Arc<MountedClip>, frac: f32) -> Option<A
     if frames == 0 {
         return None;
     }
-    let n = frames.clamp(1, SCRUB_BUCKETS);
     let bucket = scrub_bucket(frac, frames);
     let (lock_m, cv) = &*SCRUB;
     let mut st = lock(lock_m);
@@ -168,7 +179,7 @@ pub fn scrub_frame(key: ClipKey, clip: &Arc<MountedClip>, frac: f32) -> Option<A
     if let Some(t) = st.cache.get(&bucket) {
         return Some(Arc::clone(t));
     }
-    let frame = if n > 1 { bucket * (frames - 1) / (n - 1) } else { 0 };
+    let frame = bucket_frame(bucket, frames);
     st.wanted = Some(ScrubRequest { key, bucket, frame, clip: Arc::downgrade(clip) });
     if !st.worker_running {
         st.worker_running = true;
