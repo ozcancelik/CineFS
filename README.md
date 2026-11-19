@@ -34,6 +34,14 @@ mounts through the NFS client that is built into macOS.
 3. Import those folders into DaVinci Resolve, Premiere Pro or After Effects like any CinemaDNG footage.
 4. Keep CineFS running while you edit; unmount from CineFS when you are done.
 
+## Background
+
+CineFS is inspired by [MLVFS](https://github.com/davidmilligan/MLVFS), which first showed how good it is
+to mount Magic Lantern clips as CinemaDNG folders instead of converting them. CineFS is an independent
+re-implementation (it shares no code with MLVFS) that builds on the same idea: native on both macOS and
+Windows with nothing extra to install, a desktop app with clip previews, playback and one-click Resolve
+import, and support for MotionCam `.mcraw` and (experimentally) Blackmagic RAW `.braw` as well as `.MLV`.
+
 ## Highlights
 
 - **O(1) Frame & Metadata Indexing**: Single-pass container indexing at open time; no `.IDX` linear scanning or repeated file open/close overhead.
@@ -137,7 +145,8 @@ Licensed under either of [MIT](LICENSE-MIT) or [Apache-2.0](LICENSE-APACHE) at y
 ### Acknowledgements
 
 CineFS is a bridge tool; the hard work of understanding Magic Lantern RAW video was done by others.
-Thanks to the Magic Lantern team and community (the MLV format and `mlv_dump`), MLVFS, MLV App and
+Thanks to the Magic Lantern team and community (the MLV format and `mlv_dump`),
+[MLVFS](https://github.com/davidmilligan/MLVFS) (the original idea behind CineFS), MLV App and
 MotionCam, whose public documentation and behaviour guided this project. The experimental `.braw`
 decoder relies on the bitstream tables and scan orders reverse-engineered by Paul B Mahol for
 FFmpeg's (unmerged) `braw` decoder.
