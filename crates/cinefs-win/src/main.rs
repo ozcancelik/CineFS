@@ -1233,61 +1233,159 @@ mod win_gui {
         mount_sources(hwnd, vec![source]);
     }
 
+    /// Mount requests waiting for the background mount worker, oldest first. Each entry is one
+    /// request (one or many sources that end up in ONE virtual volume).
+    static MOUNT_QUEUE: Mutex<MountQueue> = Mutex::new(MountQueue {
+        jobs: std::collections::VecDeque::new(),
+        worker_running: false,
+    });
+
+    struct MountQueue {
+        jobs: std::collections::VecDeque<Vec<PathBuf>>,
+        worker_running: bool,
+    }
+
+    /// Returns the path of an existing mount that already serves `source` (single-source requests only).
+    fn find_existing_mount(sources: &[PathBuf]) -> Option<PathBuf> {
+        if sources.len() != 1 {
+            return None;
+        }
+        let guard = APP_STATE.lock().ok()?;
+        let st = guard.as_ref()?;
+        st.mounts
+            .iter()
+            .find(|m| m.source_paths.contains(&sources[0]))
+            .map(|m| m.explorer_root_path())
+    }
+
     /// Mounts one OR MANY sources (`.MLV` / `.mcraw` files and folders) into a SINGLE virtual volume.
+    ///
+    /// Called on the UI thread. Indexing clips and mounting the volume can take many seconds
+    /// (e.g. 30 clips dropped at once), so that work runs on a background worker that handles
+    /// one request at a time; the window keeps responding and shows the progress in the status
+    /// banner instead of turning "Not Responding".
     unsafe fn mount_sources(hwnd: *mut c_void, sources: Vec<PathBuf>) {
         if sources.is_empty() {
             return;
         }
+        let winfsp_ready = APP_STATE
+            .lock()
+            .ok()
+            .and_then(|g| g.as_ref().map(|st| st.winfsp_installed))
+            .unwrap_or(false);
+
+        cinefs_core::log_info!(
+            "mount_sources: {} source(s), first '{}' (winfsp_ready={winfsp_ready}, elevated={})",
+            sources.len(),
+            sources[0].display(),
+            is_elevated()
+        );
+        if let Some(mp) = find_existing_mount(&sources) {
+            cinefs_core::log_info!("already mounted at '{}', just opening it", mp.display());
+            open_path_in_explorer(&mp, "already-mounted");
+            return;
+        }
+
+        // If WinFsp is not installed yet, install the bundled driver first. This shows UI
+        // (UAC prompt, messages), so it stays on the UI thread.
+        if !winfsp_ready && !is_winfsp_available() {
+            if !install_bundled_winfsp(hwnd, false) {
+                return;
+            }
+        }
+
+        let clip_count = sources.len();
+        let (spawn_worker, queued_ahead) = {
+            let Ok(mut q) = MOUNT_QUEUE.lock() else {
+                return;
+            };
+            let ahead = q.jobs.len() + usize::from(q.worker_running);
+            q.jobs.push_back(sources);
+            let spawn = !q.worker_running;
+            q.worker_running = true;
+            (spawn, ahead)
+        };
+
+        let what = if clip_count == 1 { String::from("1 item") } else { format!("{clip_count} items") };
+        if queued_ahead == 0 {
+            set_status(hwnd, format!("Mounting {what}… (indexing clips, this can take a few seconds)"), false);
+        } else {
+            set_status(hwnd, format!("Queued {what}; it will be mounted after the current mount finishes."), false);
+        }
+
+        if spawn_worker {
+            let hwnd_val = hwnd as usize;
+            std::thread::spawn(move || mount_worker(hwnd_val as *mut c_void));
+        }
+    }
+
+    /// Background worker: mounts queued requests one after another (one at a time, so two
+    /// requests can never pick the same free drive letter), then exits when the queue is empty.
+    fn mount_worker(hwnd: *mut c_void) {
+        loop {
+            let (job, remaining) = {
+                let Ok(mut q) = MOUNT_QUEUE.lock() else {
+                    return;
+                };
+                match q.jobs.pop_front() {
+                    Some(job) => {
+                        let remaining = q.jobs.len();
+                        (job, remaining)
+                    }
+                    None => {
+                        q.worker_running = false;
+                        return;
+                    }
+                }
+            };
+            if remaining > 0 {
+                let what = if job.len() == 1 { String::from("1 item") } else { format!("{} items", job.len()) };
+                set_status(
+                    hwnd,
+                    format!("Mounting {what}… ({remaining} more request(s) waiting)"),
+                    false,
+                );
+            }
+            // A panic must not leave the queue stuck with worker_running = true.
+            let result = catch_unwind(AssertUnwindSafe(|| unsafe { mount_job(hwnd, job) }));
+            if result.is_err() {
+                cinefs_core::log_error!("mount worker: a mount request panicked; continuing with the queue");
+                set_status(hwnd, String::from("Mount failed unexpectedly (see log: tray menu > Open Log)"), true);
+            }
+        }
+    }
+
+    /// Does the actual mount of one request. Runs on the mount worker thread, never on the UI thread.
+    unsafe fn mount_job(hwnd: *mut c_void, sources: Vec<PathBuf>) {
         let source = sources[0].clone();
-        // 1. Check if already mounted or gather current settings without holding lock
-        let (already_mounted_mp, mode, used_mounts, auto_open, winfsp_ready) = {
+        // The same clip may have been queued twice before the first request finished.
+        if let Some(mp) = find_existing_mount(&sources) {
+            cinefs_core::log_info!("already mounted at '{}', just opening it", mp.display());
+            open_path_in_explorer(&mp, "already-mounted");
+            return;
+        }
+        // Read the settings when the job starts (not when it was queued), so earlier mounts
+        // from the same queue are taken into account for the free drive letter.
+        let (mode, used_mounts, auto_open) = {
             let Ok(guard) = APP_STATE.lock() else {
                 return;
             };
             let Some(st) = guard.as_ref() else {
-                return;
-            };
-            let existing = if sources.len() == 1 {
-                st.mounts
-                    .iter()
-                    .find(|m| m.source_paths.contains(&source))
-                    .map(|m| m.explorer_root_path())
-            } else {
-                None
+                return; // window already closed
             };
             let used: Vec<String> = st
                 .mounts
                 .iter()
                 .map(|m| m.mount_point.to_string_lossy().to_string())
                 .collect();
-            (
-                existing,
-                st.selected_mode,
-                used,
-                st.auto_open_explorer,
-                st.winfsp_installed,
-            )
+            (st.selected_mode, used, st.auto_open_explorer)
         };
-
         cinefs_core::log_info!(
-            "mount_sources: {} source(s), first '{}' (mode={:?}, winfsp_ready={winfsp_ready}, elevated={})",
+            "mount_job: {} source(s), first '{}' (mode={:?})",
             sources.len(),
             source.display(),
-            mode,
-            is_elevated()
+            mode
         );
-        if let Some(mp) = already_mounted_mp {
-            cinefs_core::log_info!("already mounted at '{}', just opening it", mp.display());
-            open_path_in_explorer(&mp, "already-mounted");
-            return;
-        }
-
-        // 2. If WinFsp is not installed yet, automatically install bundled WinFsp first!
-        if !winfsp_ready && !is_winfsp_available() {
-            if !install_bundled_winfsp(hwnd, false) {
-                return;
-            }
-        }
 
         let mask = GetLogicalDrives();
         cinefs_core::log_info!("GetLogicalDrives before mount = 0x{mask:08X}");
@@ -1332,12 +1430,22 @@ mod win_gui {
                     format_bytes(entry.total_bytes),
                     entry.index_time_ms
                 );
+                // If the window was closed while this mount was running, the app state is gone
+                // and nobody would ever unmount this volume: unmount it right away instead.
+                let mut orphan = Some(entry);
                 if let Ok(mut guard) = APP_STATE.lock() {
                     if let Some(st) = guard.as_mut() {
                         st.winfsp_installed = true;
                         st.status_message = Some((status, false));
-                        st.mounts.insert(0, entry);
+                        if let Some(entry) = orphan.take() {
+                            st.mounts.insert(0, entry);
+                        }
                     }
+                }
+                if let Some(mut entry) = orphan {
+                    cinefs_core::log_info!("window closed during mount; unmounting '{}'", explorer_path.display());
+                    let _ = entry.volume.unmount();
+                    return;
                 }
                 InvalidateRect(hwnd, ptr::null(), 0);
                 match visible {
