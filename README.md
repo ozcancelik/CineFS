@@ -1,4 +1,9 @@
-# CineFS
+<h1 align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/readme-logo-light.png">
+    <img src="docs/readme-logo-dark.png" alt="CineFS" width="360">
+  </picture>
+</h1>
 
 **CineFS** is a high-performance, zero-conversion virtual filesystem that mounts raw video containers (`.MLV`, `.mcraw` and, experimentally, `.braw`) as virtual **CinemaDNG** folders ready to open directly in DaVinci Resolve, Adobe Premiere Pro, and After Effects.
 
