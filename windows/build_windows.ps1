@@ -35,7 +35,14 @@ $Iscc = $IsccPaths | Where-Object { Test-Path $_ } | Select-Object -First 1
 if ($Iscc) {
     Write-Host "==> [3/4] Compiling CineFS-Setup.exe via Inno Setup ($Iscc)..." -ForegroundColor Cyan
     & $Iscc (Join-Path $PSScriptRoot "CineFS.iss")
+    # Native tools do not trip $ErrorActionPreference; without this check a failed compile
+    # would leave the plain CineFS.exe copy in place as "CineFS-Setup.exe".
+    if ($LASTEXITCODE -ne 0) { throw "Inno Setup compilation failed (exit code $LASTEXITCODE)" }
     Write-Host "==> [4/4] Done! Installer created at: windows\build\CineFS-Setup.exe" -ForegroundColor Green
+} elseif ($env:CINEFS_REQUIRE_INNO -eq "1") {
+    # Release builds (CI) must ship the Inno Setup installer (uninstaller, Apps & features
+    # entry, clean upgrades), never the fallback below.
+    throw "Inno Setup 6 (ISCC.exe) not found, but CINEFS_REQUIRE_INNO=1. Install Inno Setup 6 and retry."
 } else {
     Write-Host "==> [3/4] Built-in self-contained Setup Wizard created at: windows\build\CineFS-Setup.exe (and portable windows\build\CineFS.exe)" -ForegroundColor Green
 }

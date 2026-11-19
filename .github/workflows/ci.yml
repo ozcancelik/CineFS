@@ -162,8 +162,23 @@ jobs:
           }
       - name: Run Rust unit tests on Windows
         run: cargo test --workspace
+      # The runner image currently ships Inno Setup 6; install it only if a future image drops it.
+      - name: Ensure Inno Setup 6 is installed
+        shell: pwsh
+        run: |
+          $iscc = @("${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe", "${env:ProgramFiles}\Inno Setup 6\ISCC.exe") |
+            Where-Object { Test-Path $_ } | Select-Object -First 1
+          if ($iscc) {
+            Write-Host "Inno Setup found: $iscc"
+          } else {
+            Write-Host "Inno Setup not found, installing via Chocolatey..."
+            choco install innosetup --yes --no-progress
+            if ($LASTEXITCODE -ne 0) { throw "Inno Setup installation failed" }
+          }
       - name: Build Windows GUI, CLI, and Inno Setup Installer
         shell: pwsh
+        env:
+          CINEFS_REQUIRE_INNO: "1"   # fail instead of falling back to the built-in setup wizard
         run: ./windows/build_windows.ps1
       - name: Upload Windows Installer & Binaries
         uses: actions/upload-artifact@v4
@@ -193,6 +208,17 @@ jobs:
           path: dist
       - name: List downloaded files
         run: find dist -type f | sort
+      # Release asset names are fixed so releases/latest/download/<name> links never change.
+      # The portable exe gets its own name; "CineFS.exe" next to "CineFS-Setup.exe" is easy
+      # to mix up. (Its name must not contain "setup"/"install", which switches the app into
+      # its built-in setup wizard.)
+      - name: Collect release assets
+        run: |
+          mkdir -p release
+          cp "$(find dist/CineFS-macOS-DMG -name CineFS.dmg | head -n1)"          release/CineFS.dmg
+          cp "$(find dist/CineFS-Windows-Setup -name CineFS-Setup.exe | head -n1)" release/CineFS-Setup.exe
+          cp "$(find dist/CineFS-Windows-Setup -name CineFS.exe | head -n1)"       release/CineFS-Portable.exe
+          ls -l release
       - name: Create draft release
         uses: softprops/action-gh-release@v2
         with:
@@ -201,5 +227,6 @@ jobs:
           generate_release_notes: true
           fail_on_unmatched_files: true
           files: |
-            dist/CineFS-macOS-DMG/**/CineFS.dmg
-            dist/CineFS-Windows-Setup/**/CineFS-Setup.exe
+            release/CineFS.dmg
+            release/CineFS-Setup.exe
+            release/CineFS-Portable.exe
