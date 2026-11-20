@@ -168,6 +168,13 @@ MotionCam, whose public documentation and behaviour guided this project. The exp
 decoder relies on the bitstream tables and scan orders reverse-engineered by Paul B Mahol for
 FFmpeg's (unmerged) `braw` decoder.
 
+### Third-party components
+
+The Windows builds include the unmodified installer of **WinFsp - Windows File System Proxy,
+Copyright (C) Bill Zissimopoulos** (<https://github.com/winfsp/winfsp>), redistributed under the
+FLOSS exception of its GPLv3 license. The website uses the Geist fonts under the SIL Open Font
+License 1.1. See [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) for details.
+
 ### Trademarks & affiliation
 
 CineFS is an independent project. It is **not affiliated with, endorsed by, or sponsored by
