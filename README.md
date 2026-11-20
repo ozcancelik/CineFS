@@ -11,6 +11,11 @@ No conversion step and no extra disk space: the CinemaDNG frames are generated o
 your editing software reads them. Your original clips are never modified (the only files CineFS
 writes are Adobe `.xmp` sidecars, next to the clip, when you change settings in Camera Raw).
 
+<p align="center">
+  <img src="docs/screens/macos-clips.webp" alt="CineFS on macOS" width="49%">
+  <img src="docs/screens/windows-clips.webp" alt="CineFS on Windows" width="49%">
+</p>
+
 > **Status:** early release (v0.x). Bug reports are very welcome: please
 > [open an issue](https://github.com/ozcancelik/CineFS/issues) and, if you can, include a link to a
 > short sample clip.
