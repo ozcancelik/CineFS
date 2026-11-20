@@ -152,6 +152,33 @@ first be updated in `Cargo.toml`, `macos/CineFS/Info.plist` and `windows/CineFS.
 - `windows/` — Windows icon (`AppIcon.ico`), Inno Setup installer script (`CineFS.iss`), and PowerShell build script (`build_windows.ps1`).
 - `scripts/` — Release helpers (`check_version.sh`).
 
+## Code signing policy
+
+Windows releases (`CineFS-Setup.exe` and `CineFS-Portable.exe`) will be signed through SignPath.
+
+Free code signing provided by [SignPath.io](https://about.signpath.io), certificate by [SignPath Foundation](https://signpath.org).
+
+Only binaries built by this repository's GitHub Actions workflow from the public source code are signed.
+Bundled third-party components keep their original publisher's signature (for example the WinFsp
+installer, signed by its own maintainer) and are not re-signed by this project.
+
+**Team roles**
+
+- Committers and reviewers: [Özcan Çelik](https://github.com/ozcancelik)
+- Approvers: [Özcan Çelik](https://github.com/ozcancelik)
+
+All changes from outside contributors (pull requests) are reviewed by a committer before they are
+merged. Every signed release is approved by hand.
+
+**Privacy policy**
+
+This program will not transfer any information to other networked systems unless specifically
+requested by the user or the person installing or operating it.
+
+The macOS app runs a small NFS server bound to the local machine (`127.0.0.1`) so that Finder can
+mount the virtual folders. It does not accept connections from other computers and sends no data
+over the network.
+
 ## License
 
 CineFS is free and open source. Anyone may use, modify, redistribute and build on it, for personal
