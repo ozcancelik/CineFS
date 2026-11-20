@@ -1,0 +1,14 @@
+Third-party notices
+
+CineFS includes the following third-party component.
+
+WinFsp - Windows File System Proxy, Copyright (C) Bill Zissimopoulos
+https://github.com/winfsp/winfsp
+
+CineFS includes the unmodified WinFsp 2.0 runtime installer, exactly as released by the
+WinFsp project, and installs it when it is missing. CineFS loads the WinFsp DLL at runtime.
+
+WinFsp is licensed under the GPLv3 with a special exception for Free/Libre and Open Source
+Software, which permits FLOSS projects such as CineFS to link with the WinFsp DLL and to
+redistribute the unmodified WinFsp installer. License:
+https://github.com/winfsp/winfsp/blob/master/License.txt

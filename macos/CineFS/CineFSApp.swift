@@ -1610,12 +1610,40 @@ struct MenuBarDropdownView: View {
 
         Divider()
 
+        Button("About CineFS") { showAboutPanel() }
+
         Button("Quit CineFS") {
             manager.unmountAllSync()
             NSApplication.shared.terminate(nil)
         }
         .keyboardShortcut("q", modifiers: [.command])
     }
+}
+
+/// Standard macOS About panel (icon, name, version and copyright come from Info.plist) with a
+/// clickable link to the project page as credits.
+@MainActor
+func showAboutPanel() {
+    let projectURL = "https://github.com/ozcancelik/CineFS"
+    let paragraph = NSMutableParagraphStyle()
+    paragraph.alignment = .center
+    let base: [NSAttributedString.Key: Any] = [
+        .font: NSFont.systemFont(ofSize: 11),
+        .foregroundColor: NSColor.labelColor,
+        .paragraphStyle: paragraph,
+    ]
+    let credits = NSMutableAttributedString(
+        string: "Virtual CinemaDNG for .MLV, .mcraw and .braw clips.\n\n",
+        attributes: base
+    )
+    var link = base
+    link[.link] = URL(string: projectURL)
+    credits.append(NSAttributedString(string: "github.com/ozcancelik/CineFS", attributes: link))
+    credits.append(NSAttributedString(string: "\n\nFree and open source under MIT or Apache-2.0.", attributes: base))
+
+    NSApp.activate(ignoringOtherApps: true)
+    // An empty .version hides the "(build number)" after the version.
+    NSApp.orderFrontStandardAboutPanel(options: [.credits: credits, .version: ""])
 }
 
 @main
@@ -1628,6 +1656,11 @@ struct CineFSApp: App {
             MainMountWindowView()
         }
         .defaultSize(width: 740, height: 480)
+        .commands {
+            CommandGroup(replacing: .appInfo) {
+                Button("About CineFS") { showAboutPanel() }
+            }
+        }
 
         MenuBarExtra {
             MenuBarDropdownView()

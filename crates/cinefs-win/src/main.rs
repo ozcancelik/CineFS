@@ -96,6 +96,13 @@ mod win_gui {
     const SW_SHOW: i32 = 5;
     const SW_RESTORE: i32 = 9;
 
+    // MessageBoxW
+    const MB_YESNO: u32 = 0x0000_0004;
+    const MB_ICONINFORMATION: u32 = 0x0000_0040;
+    const IDYES: i32 = 6;
+
+    const PROJECT_URL: &str = "https://github.com/ozcancelik/CineFS";
+
     // NotifyIcon
     const NIF_MESSAGE: u32 = 0x0000_0001;
     const NIF_ICON: u32 = 0x0000_0002;
@@ -143,6 +150,7 @@ mod win_gui {
     const ID_TRAY_STRETCH: usize = 208;
     const ID_TRAY_BAKE: usize = 209;
     const ID_TRAY_FOCUS: usize = 210;
+    const ID_TRAY_ABOUT: usize = 211;
 
     /// 0 = Auto (from RAWC), 1 = off, 2 = horizontal x3 (EOS M crop_rec 3x1), 3 = vertical x1.67, 4 = vertical x3
     static STRETCH_MODE: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
@@ -475,6 +483,7 @@ mod win_gui {
         ) -> isize;
         fn ShowWindow(hWnd: *mut c_void, nCmdShow: i32) -> i32;
         fn SetForegroundWindow(hWnd: *mut c_void) -> i32;
+        fn MessageBoxW(hWnd: *mut c_void, lpText: *const u16, lpCaption: *const u16, uType: u32) -> i32;
         fn GetMessageW(
             lpMsg: *mut Msg,
             hWnd: *mut c_void,
@@ -1013,6 +1022,8 @@ mod win_gui {
         StretchMethodMenu,
         FocusPixelsMenu,
         StretchOverrideMenu,
+        /// Footer "About" button: author, project link and the WinFsp notice.
+        About,
         // Setup Wizard mode actions
         SetupToggleDesktopIcon,
         SetupToggleContextMenu,
@@ -2177,6 +2188,29 @@ mod win_gui {
         }
     }
 
+    /// About box: version, author, project link and the WinFsp notice that its FLOSS exception
+    /// requires in the user interface. "Yes" opens the project page in the browser.
+    unsafe fn show_about(hwnd: *mut c_void) {
+        let text = wstr(&format!(
+            "CineFS {}\n\
+             Virtual CinemaDNG for .MLV, .mcraw and .braw clips.\n\n\
+             By Özcan Çelik\n\
+             {PROJECT_URL}\n\
+             Free and open source under MIT or Apache-2.0.\n\n\
+             Includes WinFsp - Windows File System Proxy,\n\
+             Copyright (C) Bill Zissimopoulos\n\
+             https://github.com/winfsp/winfsp\n\n\
+             Open the CineFS page on GitHub?",
+            env!("CARGO_PKG_VERSION")
+        ));
+        let caption = wstr("About CineFS");
+        if MessageBoxW(hwnd, text.as_ptr(), caption.as_ptr(), MB_YESNO | MB_ICONINFORMATION) == IDYES {
+            let open_w = wstr("open");
+            let url_w = wstr(PROJECT_URL);
+            ShellExecuteW(ptr::null_mut(), open_w.as_ptr(), url_w.as_ptr(), ptr::null(), ptr::null(), SW_SHOWNORMAL);
+        }
+    }
+
     unsafe fn show_tray_menu(hwnd: *mut c_void) {
         let menu = CreatePopupMenu();
         if menu.is_null() {
@@ -2216,6 +2250,8 @@ mod win_gui {
         AppendMenuW(menu, MF_STRING, ID_TRAY_FOCUS, s_fp.as_ptr());
 
         AppendMenuW(menu, MF_STRING, ID_TRAY_OPEN_LOG, s_log.as_ptr());
+        let s_about = wstr("About CineFS...");
+        AppendMenuW(menu, MF_STRING, ID_TRAY_ABOUT, s_about.as_ptr());
         AppendMenuW(menu, MF_SEPARATOR, 0, ptr::null());
         AppendMenuW(menu, MF_STRING, ID_TRAY_EXIT, s_exit.as_ptr());
 
@@ -3705,9 +3741,11 @@ mod win_gui {
                 render_button(st, canvas, text_cmds, rc, &label, action, BtnStyle::Secondary, dpi);
                 x = rc.right + gap;
             }
+            let about_rc = Rect { left: w - pad_x - scale_dpi(64, dpi), top: sy, right: w - pad_x, bottom: sy + sh };
+            render_button(st, canvas, text_cmds, about_rc, "About", HitAction::About, BtnStyle::Secondary, dpi);
             text_cmds.push(TextDrawCmd {
                 text: String::from("Applies to the next mount"),
-                rect: Rect { left: x + scale_dpi(4, dpi), top: sy, right: w - pad_x, bottom: sy + sh },
+                rect: Rect { left: x + scale_dpi(4, dpi), top: sy, right: about_rc.left - gap, bottom: sy + sh },
                 color: COL_TEXT_MUTED,
                 font_kind: FontKind::Subtitle,
                 flags: DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS,
@@ -3938,6 +3976,7 @@ mod win_gui {
                 InvalidateRect(hwnd, ptr::null(), 0);
             }
             HitAction::LocateResolve => prompt_locate_resolve(hwnd),
+            HitAction::About => show_about(hwnd),
             HitAction::UnmountAll => unmount_all(hwnd),
             HitAction::CardExplorer(m_idx) => {
                 let path_opt = {
@@ -4407,6 +4446,7 @@ mod win_gui {
                             .unwrap_or_else(cinefs_core::log::log_file_path);
                         let _ = Command::new("notepad.exe").arg(&lp).spawn();
                     }
+                    ID_TRAY_ABOUT => show_about(hwnd),
                     ID_TRAY_EXIT => {
                         DestroyWindow(hwnd);
                     }

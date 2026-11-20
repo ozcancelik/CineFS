@@ -21,6 +21,8 @@ DefaultDirName={autopf}\{#MyAppName}
 DefaultGroupName={#MyAppName}
 AllowNoIcons=yes
 LicenseFile=..\LICENSE-MIT
+; WinFsp's FLOSS exception requires its notice in the user interface: shown as an installer page.
+InfoBeforeFile=THIRD_PARTY_NOTICES.txt
 OutputDir=build
 OutputBaseFilename=CineFS-Setup
 SetupIconFile=AppIcon.ico
@@ -42,6 +44,9 @@ Name: "contextmenu"; Description: "Add 'Mount with CineFS' to Windows Explorer r
 Source: "..\target\release\cinefs-win.exe"; DestDir: "{app}"; DestName: "CineFS.exe"; Flags: ignoreversion
 Source: "..\target\release\cinefs-cli.exe"; DestDir: "{app}"; DestName: "cinefs-cli.exe"; Flags: ignoreversion
 Source: "AppIcon.ico"; DestDir: "{app}"; Flags: ignoreversion
+Source: "THIRD_PARTY_NOTICES.txt"; DestDir: "{app}"; Flags: ignoreversion
+Source: "..\LICENSE-MIT"; DestDir: "{app}"; DestName: "LICENSE-MIT.txt"; Flags: ignoreversion
+Source: "..\LICENSE-APACHE"; DestDir: "{app}"; DestName: "LICENSE-APACHE.txt"; Flags: ignoreversion
 ; Optional bundled WinFsp installer (downloaded by CI or build_windows.ps1 into windows\deps\winfsp.msi)
 Source: "deps\winfsp.msi"; DestDir: "{tmp}"; Flags: ignoreversion deleteafterinstall skipifsourcedoesntexist
 
