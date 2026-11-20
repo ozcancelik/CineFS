@@ -402,14 +402,14 @@ struct PlayerScreen: View {
                     in: 0...Double(max(1, c.frameCount - 1))
                 )
 
-                Text("\(c.timecode(c.position))  \(Int(c.position.rounded()) + 1)/\(c.frameCount)")
+                Text(verbatim: "\(c.timecode(c.position))  \(Int(c.position.rounded()) + 1)/\(c.frameCount)")
                     .font(.system(size: 12, design: .monospaced))
                     .foregroundStyle(.secondary)
                 Text(String(format: "%.2f fps", c.fps))
                     .font(.system(size: 12, design: .monospaced))
                     .foregroundStyle(.secondary)
                 if c.dropped > 0 {
-                    Text("dropped \(c.dropped)")
+                    Text(verbatim: "dropped \(c.dropped)")
                         .font(.system(size: 12, design: .monospaced))
                         .foregroundStyle(.orange)
                         .help("Frames skipped because they were not decoded in time")
@@ -1142,7 +1142,7 @@ struct MainMountWindowView: View {
                         .font(.system(size: 12))
                         .foregroundStyle(.secondary)
                 } else {
-                    Text("\(manager.mounts.count) active mount\(manager.mounts.count == 1 ? "" : "s") • ~/CineFS")
+                    Text(verbatim: "\(manager.mounts.count) active mount\(manager.mounts.count == 1 ? "" : "s") • ~/CineFS")
                         .font(.system(size: 11))
                         .foregroundStyle(.secondary)
                 }
@@ -1339,14 +1339,14 @@ struct ClipTableView: View {
                     .buttonStyle(.plain)
                     .help("\(clip.folderName) — click to show the clip folder in Finder")
 
-                    Text("\(clip.width)×\(clip.height)")
+                    Text(verbatim: "\(clip.width)×\(clip.height)")
                         .frame(width: 84, alignment: .trailing)
-                    Text("\(clip.bitsPerPixel)")
+                    Text(verbatim: "\(clip.bitsPerPixel)")
                         .frame(width: 34, alignment: .trailing)
                         .help("Black level \(clip.blackLevel) · White level \(clip.whiteLevel) — " + (clip.levelSource == "fallback" ? "file values were invalid, corrected" : "from the MLV file"))
                     Text(String(format: "%.2f", clip.fps))
                         .frame(width: 46, alignment: .trailing)
-                    Text("\(clip.frameCount)")
+                    Text(verbatim: "\(clip.frameCount)")
                         .frame(width: 52, alignment: .trailing)
 
                     Group {
@@ -1430,7 +1430,7 @@ struct MountCardView: View {
                 VStack(alignment: .leading, spacing: 2) {
                     Text(URL(fileURLWithPath: item.summary.mountPoint).lastPathComponent)
                         .font(.system(size: 14, weight: .semibold))
-                    Text("\(item.summary.mountPoint)  •  NFSv3 127.0.0.1:\(item.summary.nfsPort)  •  Indexed in \(String(format: "%.1f", item.summary.indexTimeMs)) ms")
+                    Text(verbatim: "\(item.summary.mountPoint)  •  NFSv3 127.0.0.1:\(item.summary.nfsPort)  •  Indexed in \(String(format: "%.1f", item.summary.indexTimeMs)) ms")
                         .font(.system(size: 11))
                         .foregroundStyle(.secondary)
                         .lineLimit(1)
@@ -1668,7 +1668,7 @@ struct CineFSApp: App {
             HStack(spacing: 4) {
                 Image(systemName: "film.stack")
                 if !manager.mounts.isEmpty {
-                    Text("\(manager.mounts.count)")
+                    Text(verbatim: "\(manager.mounts.count)")
                 }
             }
         }
