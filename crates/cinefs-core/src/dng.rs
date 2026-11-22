@@ -113,6 +113,8 @@ pub struct DngTemplate {
     pub bake: Option<BakePlan>,
     /// `Some` when focus pixels are corrected in the raw data (disables LJ92 passthrough).
     pub fix: Option<std::sync::Arc<crate::focus_fix::FocusFix>>,
+    /// `Some` when Dual ISO recovery is active (outputs 16-bit linear `0..65535`).
+    pub dual_iso: Option<std::sync::Arc<crate::dual_iso::DualIsoCalibration>>,
     /// Dimensions of the generated DNG (differ from the source clip when `bake` is set).
     pub out_width: u32,
     pub out_height: u32,
@@ -145,7 +147,11 @@ impl DngTemplate {
             None
         };
         let fix = clip.focus_fix.clone();
-        if (bake.is_some() || fix.is_some()) && mode == ResolvedPayloadMode::Lj92Passthrough {
+        let dual_iso = clip.dual_iso.clone();
+        if dual_iso.is_some() {
+            // Dual ISO dynamic range exceeds 14-bit; always output 16-bit linear (0..65535).
+            mode = ResolvedPayloadMode::Unpacked16;
+        } else if (bake.is_some() || fix.is_some()) && mode == ResolvedPayloadMode::Lj92Passthrough {
             mode = ResolvedPayloadMode::NativePacked; // pixels must be touched, so passthrough is impossible
         }
         let (width, height) = match bake {
@@ -174,11 +180,16 @@ impl DngTemplate {
 
         let max_for_depth = ((1u32 << dng_bits_per_sample) - 1) as i32;
         let levels = &clip.levels;
-        let black_level = levels.black;
-        let white_level = if dng_bits_per_sample < 16 {
-            (levels.white as i32).min(max_for_depth).max(1) as u32
+        let (black_level, white_level) = if dual_iso.is_some() {
+            (0u32, 65535u32)
         } else {
-            levels.white.max(1)
+            let bl = levels.black;
+            let wl = if dng_bits_per_sample < 16 {
+                (levels.white as i32).min(max_for_depth).max(1) as u32
+            } else {
+                levels.white.max(1)
+            };
+            (bl, wl)
         };
 
         let meta0 = &clip.dynamic_metas[0];
@@ -490,6 +501,7 @@ impl DngTemplate {
             mode,
             bake,
             fix,
+            dual_iso,
             out_width: width as u32,
             out_height: height as u32,
             reel_name,
@@ -555,6 +567,7 @@ impl DngTemplate {
     pub fn is_byte_swapped_sliceable(&self, clip: &MlvClip) -> bool {
         self.bake.is_none()
             && self.fix.is_none()
+            && self.dual_iso.is_none()
             && !clip.is_codec_decoded()
             && matches!(self.mode, ResolvedPayloadMode::NativePacked)
             && !clip.is_lj92
@@ -604,7 +617,10 @@ impl DngTemplate {
     ) -> Result<Vec<u8>> {
         let mut src = self.decode_to_u16_le(clip, frame_index, raw_len)?;
         if let Some(fix) = &self.fix {
-            fix.apply_le(&mut src, plan.src_w, plan.src_h); // before stretching, in sensor space
+            fix.apply_le_ex(&mut src, plan.src_w, plan.src_h, self.dual_iso.is_some()); // before stretching, in sensor space
+        }
+        if let Some(diso) = &self.dual_iso {
+            diso.apply_le(&mut src, plan.src_w, plan.src_h); // before stretching, in sensor space
         }
 
         let stretched = stretch_bayer_u16(&src, plan.src_w, plan.src_h, plan.out_w, plan.out_h);
@@ -639,12 +655,15 @@ impl DngTemplate {
         Ok(src)
     }
 
-    /// Focus-pixel corrected payload (no stretch): decode, fix in sensor space, re-pack.
+    /// Focus-pixel and/or Dual ISO corrected payload (no stretch): decode, fix in sensor space, re-pack.
     fn build_fixed_payload(&self, clip: &MlvClip, frame_index: usize, raw_len: usize) -> Result<Vec<u8>> {
         let (w, h) = (clip.width as usize, clip.height as usize);
         let mut px = self.decode_to_u16_le(clip, frame_index, raw_len)?;
         if let Some(fix) = &self.fix {
-            fix.apply_le(&mut px, w, h);
+            fix.apply_le_ex(&mut px, w, h, self.dual_iso.is_some());
+        }
+        if let Some(diso) = &self.dual_iso {
+            diso.apply_le(&mut px, w, h);
         }
         let bpp = self.dng_bits_per_sample as u32;
         if bpp == 16 {
@@ -667,7 +686,7 @@ impl DngTemplate {
         if let Some(plan) = self.bake {
             return self.build_baked_payload(clip, frame_index, plan, raw_len);
         }
-        if self.fix.is_some() {
+        if self.fix.is_some() || self.dual_iso.is_some() {
             return self.build_fixed_payload(clip, frame_index, raw_len);
         }
 

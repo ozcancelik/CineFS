@@ -114,12 +114,23 @@ impl FocusFix {
 
     /// Corrects the defect pixels of one host-order `u16` frame (GPU player path).
     pub fn apply_u16(&self, buf: &mut [u16], w: usize, h: usize) {
-        apply_u16_with(buf, w, h, |x, y| self.is_defect(x, y), |f| self.for_each_defect(f));
+        self.apply_u16_ex(buf, w, h, false);
+    }
+
+    /// Like [`apply_u16`](Self::apply_u16), but when `dual_iso` is `true` skips `y ± 2` vertical
+    /// neighbours (which belong to the opposite ISO row pair) and uses `y ± 4` instead.
+    pub fn apply_u16_ex(&self, buf: &mut [u16], w: usize, h: usize, dual_iso: bool) {
+        apply_u16_with(buf, w, h, dual_iso, |x, y| self.is_defect(x, y), |f| self.for_each_defect(f));
     }
 
     /// Corrects the defect pixels of one little-endian `u16` frame in place (DNG path).
     pub fn apply_le(&self, buf: &mut [u8], w: usize, h: usize) {
-        apply_le_with(buf, w, h, |x, y| self.is_defect(x, y), |f| self.for_each_defect(f));
+        self.apply_le_ex(buf, w, h, false);
+    }
+
+    /// Like [`apply_le`](Self::apply_le), with Dual ISO row-pair awareness when `dual_iso` is `true`.
+    pub fn apply_le_ex(&self, buf: &mut [u8], w: usize, h: usize, dual_iso: bool) {
+        apply_le_with(buf, w, h, dual_iso, |x, y| self.is_defect(x, y), |f| self.for_each_defect(f));
     }
 }
 
@@ -127,6 +138,7 @@ fn apply_u16_with(
     buf: &mut [u16],
     w: usize,
     h: usize,
+    dual_iso: bool,
     is_defect: impl Fn(u32, u32) -> bool,
     for_each: impl FnOnce(&mut dyn FnMut(u32, u32)),
 ) {
@@ -152,7 +164,8 @@ fn apply_u16_with(
                 }
             };
             consider(x.checked_sub(d).map(|nx| (nx, y)), (x + d < w).then_some((x + d, y)));
-            consider(y.checked_sub(d).map(|ny| (x, ny)), (y + d < h).then_some((x, y + d)));
+            let vd = if dual_iso { 4 } else { d };
+            consider(y.checked_sub(vd).map(|ny| (x, ny)), (y + vd < h).then_some((x, y + vd)));
             if best.is_some() {
                 break;
             }
@@ -168,6 +181,7 @@ fn apply_le_with(
     buf: &mut [u8],
     w: usize,
     h: usize,
+    dual_iso: bool,
     is_defect: impl Fn(u32, u32) -> bool,
     for_each: impl FnOnce(&mut dyn FnMut(u32, u32)),
 ) {
@@ -197,7 +211,8 @@ fn apply_le_with(
                 }
             };
             consider(x.checked_sub(d).map(|nx| (nx, y)), (x + d < w).then_some((x + d, y)));
-            consider(y.checked_sub(d).map(|ny| (x, ny)), (y + d < h).then_some((x, y + d)));
+            let vd = if dual_iso { 4 } else { d };
+            consider(y.checked_sub(vd).map(|ny| (x, ny)), (y + vd < h).then_some((x, y + vd)));
             if best.is_some() {
                 break;
             }
@@ -271,12 +286,12 @@ impl LatticeFix {
 
     /// Same correction as [`apply_le`](Self::apply_le) for host-order `u16` samples (GPU player path).
     pub fn apply_u16(&self, buf: &mut [u16], w: usize, h: usize) {
-        apply_u16_with(buf, w, h, |x, y| self.is_defect(x, y), |f| self.for_each_defect(f));
+        apply_u16_with(buf, w, h, false, |x, y| self.is_defect(x, y), |f| self.for_each_defect(f));
     }
 
     /// Corrects the lattice pixels of one frame (`w*h` little-endian `u16` samples) in place.
     pub fn apply_le(&self, buf: &mut [u8], w: usize, h: usize) {
-        apply_le_with(buf, w, h, |x, y| self.is_defect(x, y), |f| self.for_each_defect(f));
+        apply_le_with(buf, w, h, false, |x, y| self.is_defect(x, y), |f| self.for_each_defect(f));
     }
 }
 

@@ -200,7 +200,17 @@ pub fn render(clip: &MlvClip, max_width: usize) -> Result<Thumbnail> {
 /// Same as [`render`] for an arbitrary frame (clamped to the clip's range); used for hover scrubbing.
 pub fn render_frame(clip: &MlvClip, frame_index: usize, max_width: usize) -> Result<Thumbnail> {
     let idx = frame_index.min(clip.frames.len().saturating_sub(1));
-    let src = decode_frame_u16(clip, idx)?;
+    let mut src = decode_frame_u16(clip, idx)?;
+    let (w, h) = (clip.width as usize, clip.height as usize);
+    if let Some(fix) = &clip.focus_fix {
+        fix.apply_u16_ex(&mut src, w, h, clip.dual_iso.is_some());
+    }
+    let (black, white) = if let Some(diso) = &clip.dual_iso {
+        diso.apply_u16(&mut src, w, h);
+        (0.0f32, 65535.0f32)
+    } else {
+        (clip.levels.black as f32, clip.levels.white as f32)
+    };
     let meta = clip
         .frames
         .get(idx)
@@ -209,11 +219,11 @@ pub fn render_frame(clip: &MlvClip, frame_index: usize, max_width: usize) -> Res
     let gains = meta.map(|m| [m.wb_gain_r, m.wb_gain_g, m.wb_gain_b]).unwrap_or([1.0; 3]);
     Ok(render_from_bayer(
         &src,
-        clip.width as usize,
-        clip.height as usize,
+        w,
+        h,
         clip.cfa_pattern,
-        clip.levels.black as f32,
-        clip.levels.white as f32,
+        black,
+        white,
         gains,
         clip.stretch_y,
         camera_to_rec709(&clip.color_matrix1, clip.forward_matrix1.as_ref(), gains),

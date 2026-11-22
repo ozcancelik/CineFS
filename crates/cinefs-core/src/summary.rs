@@ -61,6 +61,8 @@ pub struct ClipSummary {
     pub focus_pixels: usize,
     /// Where the focus-pixel fix came from: `"none"` | `"map"` | `"detected"`.
     pub focus_source: &'static str,
+    /// Recovered Dual ISO EV spread (0.0 = not Dual ISO).
+    pub dual_iso_ev: f32,
 }
 
 #[derive(Clone, Debug)]
@@ -102,17 +104,22 @@ impl ClipSummary {
             stretch_axis: axis,
             stretch_baked: c.dng_template.bake.is_some(),
             stretch_source: c.clip.stretch_source,
-            black_level: c.clip.levels.black,
-            white_level: c.clip.levels.white.min(
-                if c.dng_template.dng_bits_per_sample < 16 {
-                    (1u32 << c.dng_template.dng_bits_per_sample) - 1
-                } else {
-                    u32::MAX
-                },
-            ),
+            black_level: if c.clip.dual_iso.is_some() { 0 } else { c.clip.levels.black },
+            white_level: if c.clip.dual_iso.is_some() {
+                65535
+            } else {
+                c.clip.levels.white.min(
+                    if c.dng_template.dng_bits_per_sample < 16 {
+                        (1u32 << c.dng_template.dng_bits_per_sample) - 1
+                    } else {
+                        u32::MAX
+                    },
+                )
+            },
             level_source: c.clip.levels.source,
             focus_pixels: c.clip.focus_fix.as_ref().map_or(0, |f| f.pixel_count()),
             focus_source: c.clip.focus_fix.as_ref().map_or("none", |f| f.source()),
+            dual_iso_ev: c.clip.dual_iso.as_ref().map_or(0.0, |d| d.ev_stops),
         }
     }
 
@@ -121,7 +128,7 @@ impl ClipSummary {
             "{{\"folderName\":\"{}\",\"cameraModel\":\"{}\",\"width\":{},\"height\":{},\
              \"bitsPerPixel\":{},\"fps\":{:.3},\"frameCount\":{},\"hasAudio\":{},\"payloadMode\":\"{}\",\
              \"stretch\":{:.4},\"stretchAxis\":\"{}\",\"stretchBaked\":{},\"stretchSource\":\"{}\",\
-             \"blackLevel\":{},\"whiteLevel\":{},\"levelSource\":\"{}\",\"focusPixels\":{},\"focusSource\":\"{}\"}}",
+             \"blackLevel\":{},\"whiteLevel\":{},\"levelSource\":\"{}\",\"focusPixels\":{},\"focusSource\":\"{}\",\"dualIsoEv\":{:.2}}}",
             escape_json_str(&self.folder_name),
             escape_json_str(&self.camera_model),
             self.width,
@@ -140,6 +147,7 @@ impl ClipSummary {
             self.level_source,
             self.focus_pixels,
             self.focus_source,
+            self.dual_iso_ev,
         )
     }
 }

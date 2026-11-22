@@ -4,6 +4,7 @@
 //! serialization crate. Unknown keys and malformed lines are ignored; missing keys keep defaults.
 //! UI-free and platform-neutral so it can be unit-tested anywhere.
 
+use cinefs_core::dual_iso::DualIsoMode;
 use cinefs_core::focus_fix::FocusFixMode;
 use cinefs_core::DngPayloadMode;
 use std::fs;
@@ -16,6 +17,7 @@ pub struct Settings {
     pub auto_open_explorer: bool,
     pub stretch_bake: bool,
     pub focus_fix: FocusFixMode,
+    pub dual_iso: DualIsoMode,
     /// 0 = Auto (from RAWC), 1 = off, 2 = horizontal x3, 3 = vertical x1.67, 4 = vertical x3
     pub stretch_mode: u8,
     /// Player output volume 0..1 and mute, shared by every player window.
@@ -30,6 +32,7 @@ impl Default for Settings {
             auto_open_explorer: false,
             stretch_bake: true,
             focus_fix: FocusFixMode::Auto,
+            dual_iso: DualIsoMode::Auto,
             stretch_mode: 0,
             player_volume: 1.0,
             player_muted: false,
@@ -73,6 +76,21 @@ fn parse_focus_fix(s: &str) -> Option<FocusFixMode> {
     }
 }
 
+fn dual_iso_key(m: DualIsoMode) -> &'static str {
+    match m {
+        DualIsoMode::Off => "off",
+        DualIsoMode::Auto => "auto",
+    }
+}
+
+fn parse_dual_iso(s: &str) -> Option<DualIsoMode> {
+    match s {
+        "0" | "false" | "off" => Some(DualIsoMode::Off),
+        "1" | "true" | "on" | "auto" => Some(DualIsoMode::Auto),
+        _ => None,
+    }
+}
+
 fn parse_bool(s: &str) -> Option<bool> {
     match s {
         "1" | "true" | "on" => Some(true),
@@ -112,6 +130,11 @@ impl Settings {
                         s.focus_fix = m;
                     }
                 }
+                "dual_iso" => {
+                    if let Some(m) = parse_dual_iso(v) {
+                        s.dual_iso = m;
+                    }
+                }
                 "stretch_mode" => {
                     if let Ok(n) = v.parse::<u8>() {
                         if n <= 4 {
@@ -140,12 +163,13 @@ impl Settings {
     pub fn to_text(&self) -> String {
         format!(
             "# CineFS preferences (defaults for clips mounted from now on)\n\
-             mode={}\nauto_open_explorer={}\nstretch_bake={}\nfocus_fix={}\nstretch_mode={}\n\
+             mode={}\nauto_open_explorer={}\nstretch_bake={}\nfocus_fix={}\ndual_iso={}\nstretch_mode={}\n\
              player_volume={:.3}\nplayer_muted={}\n",
             mode_key(self.mode),
             self.auto_open_explorer as u8,
             self.stretch_bake as u8,
             focus_fix_key(self.focus_fix),
+            dual_iso_key(self.dual_iso),
             self.stretch_mode,
             self.player_volume,
             self.player_muted as u8,
@@ -179,6 +203,7 @@ mod tests {
             auto_open_explorer: true,
             stretch_bake: false,
             focus_fix: FocusFixMode::Map,
+            dual_iso: DualIsoMode::Off,
             stretch_mode: 3,
             player_volume: 0.25,
             player_muted: true,

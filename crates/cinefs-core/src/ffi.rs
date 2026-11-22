@@ -217,6 +217,13 @@ pub extern "C" fn cinefs_set_focus_fix(mode: u32) {
     crate::focus_fix::set_focus_fix_mode(crate::focus_fix::FocusFixMode::from_u8(mode as u8));
 }
 
+/// Sets Dual ISO recovery mode for clips opened afterwards:
+/// `0` = Off, `1` = Auto (per-clip detection and recovery; default).
+#[no_mangle]
+pub extern "C" fn cinefs_set_dual_iso(mode: u32) {
+    crate::dual_iso::set_dual_iso_mode(crate::dual_iso::DualIsoMode::from_u8(mode as u8));
+}
+
 /// Imports clip folders (newline-separated absolute paths) into DaVinci Resolve's Media Pool via
 /// `fuscript`. Blocks up to `timeout_secs`; call from a background thread.
 /// Returns a JSON string `{"status":"imported|imported_nothing|no_project|no_resolve|no_fuscript|failed","count":N,"message":""}`

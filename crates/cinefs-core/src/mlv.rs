@@ -230,6 +230,11 @@ pub struct MlvClip {
     pub levels: crate::levels::ResolvedLevels,
     /// Focus-pixel (PDAF) correction (bundled map or clip-learned lattice), if active.
     pub focus_fix: Option<std::sync::Arc<crate::focus_fix::FocusFix>>,
+    /// `DISO` block metadata (`dualMode`, `isoValue`), if present in the MLV container.
+    pub diso_mode: u32,
+    pub diso_iso_value: u32,
+    /// Dual ISO calibration (alternating 2-row gain recovery), if detected and enabled.
+    pub dual_iso: Option<std::sync::Arc<crate::dual_iso::DualIsoCalibration>>,
     pub active_area: [i32; 4],
     pub cfa_pattern: CfaPattern,
     pub camera_name: String,
@@ -369,6 +374,9 @@ impl MlvClip {
             white_level: 16383,
             levels: crate::levels::ResolvedLevels::from_file(0, 16383),
             focus_fix: None,
+            diso_mode: 0,
+            diso_iso_value: 0,
+            dual_iso: None,
             active_area: [0; 4],
             cfa_pattern: CfaPattern::Rggb,
             camera_name: String::from("CineFS"),
@@ -671,6 +679,14 @@ impl MlvClip {
                             self.push_or_update_meta(&current_meta, saw_any_frame_before_meta);
                         }
                     }
+                    b"DISO" => {
+                        // mlv_diso_hdr_t: dualMode @16, isoValue @20
+                        let buf = self.read_block_vec(chunk_idx, offset, (bsize as usize).min(32))?;
+                        if buf.len() >= 24 {
+                            self.diso_mode = u32::from_le_bytes(buf[16..20].try_into().unwrap());
+                            self.diso_iso_value = u32::from_le_bytes(buf[20..24].try_into().unwrap());
+                        }
+                    }
                     b"WBAL" => {
                         let buf = self.read_block_vec(chunk_idx, offset, bsize as usize)?;
                         if buf.len() >= 36 {
@@ -829,6 +845,7 @@ impl MlvClip {
         }
         self.levels = crate::levels::resolve(self);
         self.focus_fix = crate::focus_fix::resolve_clip(self).map(std::sync::Arc::new);
+        self.dual_iso = crate::dual_iso::calibrate_clip(self).map(std::sync::Arc::new);
         crate::log::write(
             "INFO",
             &format!(

@@ -73,6 +73,7 @@ struct MountedClipInfo: Codable, Identifiable {
     let levelSource: String
     let focusPixels: Int
     let focusSource: String?
+    let dualIsoEv: Double?
 }
 
 struct MountSummaryPayload: Codable {
@@ -554,6 +555,7 @@ final class MountManager: ObservableObject {
         static let stretchBake = "com.ozcancelik.cinefs.stretchBake"
         static let stretchOverride = "com.ozcancelik.cinefs.stretchOverride"
         static let focusFix = "com.ozcancelik.cinefs.focusFix"
+        static let dualIso = "com.ozcancelik.cinefs.dualIso"
     }
 
     @Published var selectedMode: UInt32 = 0 { // 0 = Auto, 1 = Passthrough, 2 = NativePacked, 3 = Unpacked16
@@ -608,6 +610,14 @@ final class MountManager: ObservableObject {
         }
     }
 
+    /// Magic Lantern Dual ISO recovery for clips mounted from now on (0 = Off, 1 = Auto per-clip).
+    @Published var dualIsoMode: Int = 1 {
+        didSet {
+            cinefs_set_dual_iso(UInt32(dualIsoMode))
+            UserDefaults.standard.set(dualIsoMode, forKey: Pref.dualIso)
+        }
+    }
+
     private var statsTimer: Timer?
 
     private init() {
@@ -626,9 +636,13 @@ final class MountManager: ObservableObject {
         } else if let b = d.object(forKey: Pref.focusFix) as? Bool {
             focusFixMode = b ? 1 : 0
         }
+        if let v = d.object(forKey: Pref.dualIso) as? Int, (0...1).contains(v) {
+            dualIsoMode = v
+        }
 
         cinefs_set_stretch_bake(stretchBake ? 1 : 0)
         cinefs_set_focus_fix(UInt32(focusFixMode))
+        cinefs_set_dual_iso(UInt32(dualIsoMode))
         Self.applyStretchOverride(stretchOverride)
         resolveAppPath = detectResolveAppPath()
         statsTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
@@ -1116,6 +1130,15 @@ struct MainMountWindowView: View {
                 .frame(width: 148)
                 .help("Canon 100D / 650D / 700D / EOS M / EOS M2: remove PDAF dots. Auto uses bundled Magic Lantern focus maps first and falls back to learning the pattern from the clip; Map uses bundled maps only. Pixels are rewritten, so LJ92 passthrough is not used for those clips. Applies to the next mount.")
 
+                Picker("Dual ISO", selection: $manager.dualIsoMode) {
+                    Text("Auto").tag(1)
+                    Text("Off").tag(0)
+                }
+                .pickerStyle(.menu)
+                .controlSize(.small)
+                .frame(width: 122)
+                .help("Magic Lantern Dual ISO: automatically detect and recover Dual ISO clips per clip into 16-bit linear DNGs (normal single-ISO clips are untouched). Applies to the next mount.")
+
                 Picker("Override", selection: $manager.stretchOverride) {
                     Text("Auto").tag(0)
                     Text("Off").tag(1)
@@ -1374,17 +1397,33 @@ struct ClipTableView: View {
                     }
                     .frame(width: 40, alignment: .center)
 
+                    let hasDiso = (clip.dualIsoEv ?? 0) > 0
+                    let pillText: String = {
+                        if hasDiso && clip.focusPixels > 0 { return "16-bit + FP + DISO" }
+                        if hasDiso { return "16-bit + DISO" }
+                        if clip.focusPixels > 0 {
+                            return clip.payloadMode.contains("Native") ? "Native + FP" : "16-bit + FP"
+                        }
+                        if clip.payloadMode.contains("Passthrough") { return "LJ92 Passthrough" }
+                        if clip.payloadMode.contains("Native") { return "Native Packed" }
+                        return "16-bit Unpacked"
+                    }()
+                    let pillHelp: String = {
+                        var parts: [String] = []
+                        if hasDiso, let ev = clip.dualIsoEv {
+                            parts.append(String(format: "Dual ISO recovered (+%.1f EV, 16-bit linear)", ev))
+                        }
+                        if clip.focusPixels > 0 {
+                            parts.append("Focus pixels corrected: \(clip.focusPixels) px/frame (\(clip.focusSource == "map" ? "from Magic Lantern focus map" : "learned from the clip"))")
+                        }
+                        return parts.isEmpty ? "DNG payload mode" : parts.joined(separator: " · ") + ". Pixels are rewritten, so LJ92 passthrough is not used."
+                    }()
                     Pill(
-                        text: clip.focusPixels > 0
-                            ? (clip.payloadMode.contains("Native") ? "Native + FP" : "16-bit + FP")
-                            : clip.payloadMode.contains("Passthrough") ? "LJ92 Passthrough" :
-                              clip.payloadMode.contains("Native") ? "Native Packed" : "16-bit Unpacked",
+                        text: pillText,
                         tone: clip.payloadMode.contains("Passthrough") ? .good : .neutral
                     )
-                    .frame(width: 118, alignment: .leading)
-                    .help(clip.focusPixels > 0
-                        ? "Focus pixels (PDAF dots) corrected: \(clip.focusPixels) pixels per frame (\(clip.focusSource == "map" ? "from Magic Lantern focus map" : "learned from the clip")). Pixels are rewritten, so LJ92 passthrough is not used."
-                        : "DNG payload mode")
+                    .frame(width: 126, alignment: .leading)
+                    .help(pillHelp)
 
                     Button {
                         manager.sendToResolve(item: item, specificClipFolder: clip.folderName)

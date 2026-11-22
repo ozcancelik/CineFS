@@ -8,6 +8,7 @@ pub mod braw;
 pub mod cache;
 pub mod color_matrices;
 pub mod dng;
+pub mod dual_iso;
 pub mod ffi;
 pub mod focus_fix;
 pub mod focus_maps;

@@ -151,6 +151,7 @@ mod win_gui {
     const ID_TRAY_BAKE: usize = 209;
     const ID_TRAY_FOCUS: usize = 210;
     const ID_TRAY_ABOUT: usize = 211;
+    const ID_TRAY_DUAL_ISO: usize = 212;
 
     /// 0 = Auto (from RAWC), 1 = off, 2 = horizontal x3 (EOS M crop_rec 3x1), 3 = vertical x1.67, 4 = vertical x3
     static STRETCH_MODE: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
@@ -174,6 +175,7 @@ mod win_gui {
         let s = crate::settings::Settings::load(&settings_path());
         cinefs_core::dng::set_stretch_bake(s.stretch_bake);
         cinefs_core::focus_fix::set_focus_fix_mode(s.focus_fix);
+        cinefs_core::dual_iso::set_dual_iso_mode(s.dual_iso);
         STRETCH_MODE.store(s.stretch_mode, std::sync::atomic::Ordering::Relaxed);
         cinefs_core::mlv::set_stretch_override(stretch_override_for(s.stretch_mode));
         s
@@ -194,6 +196,7 @@ mod win_gui {
         s.auto_open_explorer = auto_open_explorer;
         s.stretch_bake = cinefs_core::dng::stretch_bake();
         s.focus_fix = cinefs_core::focus_fix::focus_fix_mode();
+        s.dual_iso = cinefs_core::dual_iso::dual_iso_mode();
         s.stretch_mode = STRETCH_MODE.load(std::sync::atomic::Ordering::Relaxed);
         if let Err(e) = s.save(&settings_path()) {
             cinefs_core::log_warn!("Could not save settings: {e}");
@@ -216,6 +219,8 @@ mod win_gui {
     const ID_FOCUS_AUTO: usize = 320;
     const ID_FOCUS_MAP: usize = 321;
     const ID_FOCUS_OFF: usize = 322;
+    const ID_DUAL_ISO_AUTO: usize = 325;
+    const ID_DUAL_ISO_OFF: usize = 326;
     /// `ID_OVERRIDE_BASE + stretch mode` (0..=4).
     const ID_OVERRIDE_BASE: usize = 330;
 
@@ -258,6 +263,22 @@ mod win_gui {
         set_status(
             hwnd,
             format!("Focus pixels: {desc} — applies to clips mounted from now on."),
+            false,
+        );
+    }
+
+    unsafe fn apply_dual_iso(hwnd: *mut c_void, mode: cinefs_core::dual_iso::DualIsoMode) {
+        cinefs_core::dual_iso::set_dual_iso_mode(mode);
+        persist_settings();
+        let desc = match mode {
+            cinefs_core::dual_iso::DualIsoMode::Auto => {
+                "Auto (per-clip Dual ISO detection and 16-bit recovery)"
+            }
+            cinefs_core::dual_iso::DualIsoMode::Off => "off",
+        };
+        set_status(
+            hwnd,
+            format!("Dual ISO: {desc} — applies to clips mounted from now on."),
             false,
         );
     }
@@ -1028,6 +1049,7 @@ mod win_gui {
         /// Footer settings menus (applied to the next mount), like the macOS footer pickers.
         StretchMethodMenu,
         FocusPixelsMenu,
+        DualIsoMenu,
         StretchOverrideMenu,
         /// Footer "About" button: author, project link and the WinFsp notice.
         About,
@@ -2255,6 +2277,11 @@ mod win_gui {
             cinefs_core::focus_fix::FocusFixMode::Off => "Focus pixels: Off  (click to change)",
         });
         AppendMenuW(menu, MF_STRING, ID_TRAY_FOCUS, s_fp.as_ptr());
+        let s_diso = wstr(match cinefs_core::dual_iso::dual_iso_mode() {
+            cinefs_core::dual_iso::DualIsoMode::Auto => "Dual ISO: Auto (per-clip recovery)  (click to change)",
+            cinefs_core::dual_iso::DualIsoMode::Off => "Dual ISO: Off  (click to change)",
+        });
+        AppendMenuW(menu, MF_STRING, ID_TRAY_DUAL_ISO, s_diso.as_ptr());
 
         AppendMenuW(menu, MF_STRING, ID_TRAY_OPEN_LOG, s_log.as_ptr());
         let s_about = wstr("About CineFS...");
@@ -3596,7 +3623,11 @@ mod win_gui {
                             Some((p_bd, 1.0)),
                         );
                         text_cmds.push(TextDrawCmd {
-                            text: if clip.focus_pixels > 0 {
+                            text: if clip.dual_iso_ev > 0.0 && clip.focus_pixels > 0 {
+                                "16-bit + FP + DISO".to_string()
+                            } else if clip.dual_iso_ev > 0.0 {
+                                "16-bit + DISO".to_string()
+                            } else if clip.focus_pixels > 0 {
                                 if clip.payload_badge.starts_with("Native") { "Native + FP" } else { "16-bit + FP" }.to_string()
                             } else {
                                 clip.payload_badge.to_string()
@@ -3736,11 +3767,13 @@ mod win_gui {
             let gap = scale_dpi(8, dpi);
             let bake = cinefs_core::dng::stretch_bake();
             let focus = cinefs_core::focus_fix::focus_fix_mode();
+            let diso = cinefs_core::dual_iso::dual_iso_mode();
             let mode = STRETCH_MODE.load(std::sync::atomic::Ordering::Relaxed);
             let buttons = [
-                (format!("Stretch: {}", if bake { "Baked into DNG" } else { "Metadata only" }), 172, HitAction::StretchMethodMenu),
-                (format!("Focus pixels: {}", focus.label()), 140, HitAction::FocusPixelsMenu),
-                (format!("Override: {}", stretch_mode_short(mode)), 176, HitAction::StretchOverrideMenu),
+                (format!("Stretch: {}", if bake { "Baked into DNG" } else { "Metadata only" }), 164, HitAction::StretchMethodMenu),
+                (format!("Focus pixels: {}", focus.label()), 132, HitAction::FocusPixelsMenu),
+                (format!("Dual ISO: {}", diso.label()), 116, HitAction::DualIsoMenu),
+                (format!("Override: {}", stretch_mode_short(mode)), 164, HitAction::StretchOverrideMenu),
             ];
             let mut x = pad_x;
             for (label, bw, action) in buttons {
@@ -4016,7 +4049,7 @@ mod win_gui {
                 }
             }
             HitAction::ClipResolve(m_idx, c_idx) => import_to_resolve(hwnd, Some(m_idx), Some(c_idx)),
-            HitAction::StretchMethodMenu | HitAction::FocusPixelsMenu | HitAction::StretchOverrideMenu => {
+            HitAction::StretchMethodMenu | HitAction::FocusPixelsMenu | HitAction::DualIsoMenu | HitAction::StretchOverrideMenu => {
                 let rect = {
                     let Ok(guard) = APP_STATE.lock() else {
                         return;
@@ -4058,6 +4091,25 @@ mod win_gui {
                                     ID_FOCUS_OFF,
                                     "Off",
                                     cur == cinefs_core::focus_fix::FocusFixMode::Off,
+                                ),
+                            ],
+                        );
+                    }
+                    HitAction::DualIsoMenu => {
+                        let cur = cinefs_core::dual_iso::dual_iso_mode();
+                        show_choice_popup(
+                            hwnd,
+                            rc,
+                            &[
+                                (
+                                    ID_DUAL_ISO_AUTO,
+                                    "Auto (per-clip Dual ISO recovery, 16-bit DNG)",
+                                    cur == cinefs_core::dual_iso::DualIsoMode::Auto,
+                                ),
+                                (
+                                    ID_DUAL_ISO_OFF,
+                                    "Off",
+                                    cur == cinefs_core::dual_iso::DualIsoMode::Off,
                                 ),
                             ],
                         );
@@ -4454,6 +4506,13 @@ mod win_gui {
                         };
                         apply_focus_fix(hwnd, next);
                     }
+                    ID_TRAY_DUAL_ISO => {
+                        let next = match cinefs_core::dual_iso::dual_iso_mode() {
+                            cinefs_core::dual_iso::DualIsoMode::Auto => cinefs_core::dual_iso::DualIsoMode::Off,
+                            cinefs_core::dual_iso::DualIsoMode::Off => cinefs_core::dual_iso::DualIsoMode::Auto,
+                        };
+                        apply_dual_iso(hwnd, next);
+                    }
                     ID_TRAY_STRETCH => {
                         apply_stretch_mode(hwnd, (STRETCH_MODE.load(std::sync::atomic::Ordering::Relaxed) + 1) % 5)
                     }
@@ -4461,6 +4520,8 @@ mod win_gui {
                     ID_FOCUS_AUTO => apply_focus_fix(hwnd, cinefs_core::focus_fix::FocusFixMode::Auto),
                     ID_FOCUS_MAP => apply_focus_fix(hwnd, cinefs_core::focus_fix::FocusFixMode::Map),
                     ID_FOCUS_OFF => apply_focus_fix(hwnd, cinefs_core::focus_fix::FocusFixMode::Off),
+                    ID_DUAL_ISO_AUTO => apply_dual_iso(hwnd, cinefs_core::dual_iso::DualIsoMode::Auto),
+                    ID_DUAL_ISO_OFF => apply_dual_iso(hwnd, cinefs_core::dual_iso::DualIsoMode::Off),
                     _ if (ID_OVERRIDE_BASE..ID_OVERRIDE_BASE + 5).contains(&id) => {
                         apply_stretch_mode(hwnd, (id - ID_OVERRIDE_BASE) as u8)
                     }

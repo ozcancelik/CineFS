@@ -28,9 +28,13 @@ impl FrameProvider for ClipProvider {
 
     fn decode(&self, index: usize) -> Result<Vec<u16>, String> {
         let c = &self.clip.clip;
+        let (w, h) = (c.width as usize, c.height as usize);
         let mut px = cinefs_core::focus_probe::decode_frame_u16(c, index).map_err(|e| e.to_string())?;
         if let Some(fix) = &c.focus_fix {
-            fix.apply_u16(&mut px, c.width as usize, c.height as usize);
+            fix.apply_u16_ex(&mut px, w, h, c.dual_iso.is_some());
+        }
+        if let Some(diso) = &c.dual_iso {
+            diso.apply_u16(&mut px, w, h);
         }
         Ok(px)
     }
@@ -46,12 +50,17 @@ pub fn format_for_clip(clip: &MountedClip) -> FrameFormat {
     let cfa = c.cfa_pattern.dng_bytes().map(|v| v as u32);
     let matrix = cinefs_core::thumbnail::camera_to_rec709(&c.color_matrix1, c.forward_matrix1.as_ref(), gains)
         .unwrap_or([1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0]);
+    let (black, white) = if c.dual_iso.is_some() {
+        (0.0f32, 65535.0f32)
+    } else {
+        (c.levels.black as f32, c.levels.white as f32)
+    };
     FrameFormat {
         width: c.width,
         height: c.height,
         cfa,
-        black: c.levels.black as f32,
-        white: c.levels.white as f32,
+        black,
+        white,
         wb,
         matrix,
         exposure: 1.0,
