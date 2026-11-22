@@ -73,8 +73,10 @@ pub struct DualIsoCalibration {
     pub black_lo: f32,
     /// Black level for high-ISO rows.
     pub black_hi: f32,
-    /// White level in raw sensor units.
+    /// White level in raw sensor units (low-ISO ceiling).
     pub white: f32,
+    /// Detected high-ISO clipping level (may be below `white` to prevent pink highlights).
+    pub white_hi: f32,
     /// Scale factor mapping low-ISO linear `(0 .. white - black_lo)` into `0 .. 65535`.
     pub scale_to_u16: f32,
 }
@@ -240,6 +242,42 @@ pub fn calibrate_from_frames(
     let black_hi = (black + delta_black).max(0.0);
     let white_range = (white - black_lo).max(1.0);
 
+    // Detect the true high-ISO clipping point (some Canon bodies clip high-ISO rows below
+    // header `white_level`, which would otherwise cause pink highlights). Discard the brightest
+    // outlier pixels and apply a safety margin only when the frame actually approaches clipping.
+    let mut hi_samples: Vec<u16> = Vec::new();
+    for &px in frames {
+        if px.len() < w * h {
+            continue;
+        }
+        let mut y = 0usize;
+        while y < h {
+            if is_hi_row[y & 3] {
+                let row = y * w;
+                let mut x = 0usize;
+                while x < w {
+                    hi_samples.push(px[row + x]);
+                    x += 3;
+                }
+            }
+            y += 3;
+        }
+    }
+    let white_hi = if hi_samples.len() > 64 {
+        let discard = (50 * frames.len()).min(hi_samples.len() / 20).max(10);
+        let idx = hi_samples.len().saturating_sub(1 + discard);
+        hi_samples.select_nth_unstable(idx);
+        let p_hi_max = hi_samples[idx] as f32;
+        if p_hi_max >= black_hi + range * 0.70 {
+            let margin = (range * 0.08).clamp(32.0, 1200.0);
+            (p_hi_max - margin).clamp(black_hi + range * 0.50, white)
+        } else {
+            white
+        }
+    } else {
+        white
+    };
+
     Some(DualIsoCalibration {
         is_hi_row,
         gain: phase_gains,
@@ -248,6 +286,7 @@ pub fn calibrate_from_frames(
         black_lo,
         black_hi,
         white,
+        white_hi,
         scale_to_u16: 65535.0 / white_range,
     })
 }
@@ -362,7 +401,7 @@ impl DualIsoCalibration {
             return;
         }
         let src = buf[..w * h].to_vec();
-        let hi_clip = (self.white - self.black_hi).max(1.0);
+        let hi_clip = (self.white_hi - self.black_hi).max(1.0);
         // High-ISO row transition: own high-ISO in shadows/midtones, interpolated low-ISO in highlights.
         let hi_t0 = 0.50 * hi_clip;
         let hi_t1 = 0.88 * hi_clip;

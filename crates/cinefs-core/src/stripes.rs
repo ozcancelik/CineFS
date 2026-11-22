@@ -67,6 +67,8 @@ pub struct StripeFix {
     pub offset: [f32; 16],
     /// Black level used as the linear pivot (`black + (v - black) * gain + offset`).
     pub black: f32,
+    /// White level ceiling (clipped pixels at or above effective white are left untouched).
+    pub white: f32,
     /// Maximum gain deviation from 1.0, in percent (e.g. `1.2` = 1.2%).
     pub max_gain_pct: f32,
     /// Maximum absolute offset correction, in raw counts.
@@ -246,6 +248,7 @@ pub fn calibrate_from_frames(
         gain,
         offset,
         black,
+        white,
         max_gain_pct,
         max_offset,
     })
@@ -336,14 +339,22 @@ impl StripeFix {
         if buf.len() < w * h {
             return;
         }
+        // Estimate effective clipping white so saturated highlights are never scaled into bands.
+        let floor_white = (self.white * (2.0 / 3.0)) as u16;
+        let max_px = buf[..w * h].iter().copied().max().unwrap_or(0);
+        let eff_white = max_px.max(floor_white).min(self.white as u16);
+        let eff_white_f = eff_white as f32;
         let black = self.black;
         for y in 0..h {
             let row = &mut buf[y * w..(y + 1) * w];
             let y_off = (y & 1) << 3;
             for (x, px) in row.iter_mut().enumerate() {
+                if *px >= eff_white {
+                    continue;
+                }
                 let p = y_off | (x & 7);
                 let v = black + (*px as f32 - black) * self.gain[p] + self.offset[p];
-                *px = (v + 0.5).clamp(0.0, 65535.0) as u16;
+                *px = (v + 0.5).clamp(0.0, eff_white_f) as u16;
             }
         }
     }
@@ -353,15 +364,28 @@ impl StripeFix {
         if buf.len() < w * h * 2 {
             return;
         }
+        let floor_white = (self.white * (2.0 / 3.0)) as u16;
+        let mut max_px = 0u16;
+        for chunk in buf[..w * h * 2].chunks_exact(2) {
+            let v = u16::from_le_bytes([chunk[0], chunk[1]]);
+            if v > max_px {
+                max_px = v;
+            }
+        }
+        let eff_white = max_px.max(floor_white).min(self.white as u16);
+        let eff_white_f = eff_white as f32;
         let black = self.black;
         for y in 0..h {
             let row = &mut buf[y * w * 2..(y + 1) * w * 2];
             let y_off = (y & 1) << 3;
             for (x, chunk) in row.chunks_exact_mut(2).enumerate() {
+                let raw_u16 = u16::from_le_bytes([chunk[0], chunk[1]]);
+                if raw_u16 >= eff_white {
+                    continue;
+                }
                 let p = y_off | (x & 7);
-                let raw = u16::from_le_bytes([chunk[0], chunk[1]]) as f32;
-                let v = black + (raw - black) * self.gain[p] + self.offset[p];
-                chunk.copy_from_slice(&((v + 0.5).clamp(0.0, 65535.0) as u16).to_le_bytes());
+                let v = black + (raw_u16 as f32 - black) * self.gain[p] + self.offset[p];
+                chunk.copy_from_slice(&((v + 0.5).clamp(0.0, eff_white_f) as u16).to_le_bytes());
             }
         }
     }
