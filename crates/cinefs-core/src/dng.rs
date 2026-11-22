@@ -112,7 +112,7 @@ pub struct DngTemplate {
     /// `Some` when the anamorphic stretch is baked into the pixels (square-pixel DNG output).
     pub bake: Option<BakePlan>,
     /// `Some` when focus pixels are corrected in the raw data (disables LJ92 passthrough).
-    pub fix: Option<std::sync::Arc<crate::focus_fix::LatticeFix>>,
+    pub fix: Option<std::sync::Arc<crate::focus_fix::FocusFix>>,
     /// Dimensions of the generated DNG (differ from the source clip when `bake` is set).
     pub out_width: u32,
     pub out_height: u32,

@@ -59,6 +59,8 @@ pub struct ClipSummary {
     pub level_source: &'static str,
     /// Number of focus pixels corrected per frame (0 = none).
     pub focus_pixels: usize,
+    /// Where the focus-pixel fix came from: `"none"` | `"map"` | `"detected"`.
+    pub focus_source: &'static str,
 }
 
 #[derive(Clone, Debug)]
@@ -110,6 +112,7 @@ impl ClipSummary {
             ),
             level_source: c.clip.levels.source,
             focus_pixels: c.clip.focus_fix.as_ref().map_or(0, |f| f.pixel_count()),
+            focus_source: c.clip.focus_fix.as_ref().map_or("none", |f| f.source()),
         }
     }
 
@@ -118,7 +121,7 @@ impl ClipSummary {
             "{{\"folderName\":\"{}\",\"cameraModel\":\"{}\",\"width\":{},\"height\":{},\
              \"bitsPerPixel\":{},\"fps\":{:.3},\"frameCount\":{},\"hasAudio\":{},\"payloadMode\":\"{}\",\
              \"stretch\":{:.4},\"stretchAxis\":\"{}\",\"stretchBaked\":{},\"stretchSource\":\"{}\",\
-             \"blackLevel\":{},\"whiteLevel\":{},\"levelSource\":\"{}\",\"focusPixels\":{}}}",
+             \"blackLevel\":{},\"whiteLevel\":{},\"levelSource\":\"{}\",\"focusPixels\":{},\"focusSource\":\"{}\"}}",
             escape_json_str(&self.folder_name),
             escape_json_str(&self.camera_model),
             self.width,
@@ -136,6 +139,7 @@ impl ClipSummary {
             self.white_level,
             self.level_source,
             self.focus_pixels,
+            self.focus_source,
         )
     }
 }

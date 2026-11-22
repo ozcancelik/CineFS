@@ -24,3 +24,9 @@ Copyright 2026 The Geist Project Authors (<https://github.com/vercel/geist-font>
 The project website (`docs/`) uses the Geist and Geist Mono fonts, licensed under the SIL Open Font
 License, Version 1.1. The full license text is in [docs/fonts/OFL.txt](docs/fonts/OFL.txt). The fonts
 are not included in the CineFS applications.
+
+## Magic Lantern focus pixel maps
+
+The bundled focus-pixel coordinate maps (`crates/cinefs-core/data/focus_maps.bin`, covering Canon
+100D, 650D, 700D, EOS M and EOS M2 readout modes) are derived from the community-measured focus
+pixel maps published by the Magic Lantern project (<https://www.magiclantern.fm>).

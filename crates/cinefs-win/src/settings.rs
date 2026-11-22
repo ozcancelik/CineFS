@@ -4,6 +4,7 @@
 //! serialization crate. Unknown keys and malformed lines are ignored; missing keys keep defaults.
 //! UI-free and platform-neutral so it can be unit-tested anywhere.
 
+use cinefs_core::focus_fix::FocusFixMode;
 use cinefs_core::DngPayloadMode;
 use std::fs;
 use std::path::Path;
@@ -14,7 +15,7 @@ pub struct Settings {
     /// Open the mounted volume in Explorer right after mounting (off: the CineFS window is the hub).
     pub auto_open_explorer: bool,
     pub stretch_bake: bool,
-    pub focus_fix: bool,
+    pub focus_fix: FocusFixMode,
     /// 0 = Auto (from RAWC), 1 = off, 2 = horizontal x3, 3 = vertical x1.67, 4 = vertical x3
     pub stretch_mode: u8,
     /// Player output volume 0..1 and mute, shared by every player window.
@@ -28,7 +29,7 @@ impl Default for Settings {
             mode: DngPayloadMode::Auto,
             auto_open_explorer: false,
             stretch_bake: true,
-            focus_fix: true,
+            focus_fix: FocusFixMode::Auto,
             stretch_mode: 0,
             player_volume: 1.0,
             player_muted: false,
@@ -51,6 +52,23 @@ fn parse_mode(s: &str) -> Option<DngPayloadMode> {
         "passthrough" => Some(DngPayloadMode::Lj92Passthrough),
         "packed" => Some(DngPayloadMode::NativePacked),
         "unpacked16" => Some(DngPayloadMode::Unpacked16),
+        _ => None,
+    }
+}
+
+fn focus_fix_key(m: FocusFixMode) -> &'static str {
+    match m {
+        FocusFixMode::Off => "off",
+        FocusFixMode::Auto => "auto",
+        FocusFixMode::Map => "map",
+    }
+}
+
+fn parse_focus_fix(s: &str) -> Option<FocusFixMode> {
+    match s {
+        "0" | "false" | "off" => Some(FocusFixMode::Off),
+        "1" | "true" | "on" | "auto" => Some(FocusFixMode::Auto),
+        "2" | "map" => Some(FocusFixMode::Map),
         _ => None,
     }
 }
@@ -90,8 +108,8 @@ impl Settings {
                     }
                 }
                 "focus_fix" => {
-                    if let Some(b) = parse_bool(v) {
-                        s.focus_fix = b;
+                    if let Some(m) = parse_focus_fix(v) {
+                        s.focus_fix = m;
                     }
                 }
                 "stretch_mode" => {
@@ -127,7 +145,7 @@ impl Settings {
             mode_key(self.mode),
             self.auto_open_explorer as u8,
             self.stretch_bake as u8,
-            self.focus_fix as u8,
+            focus_fix_key(self.focus_fix),
             self.stretch_mode,
             self.player_volume,
             self.player_muted as u8,
@@ -160,7 +178,7 @@ mod tests {
             mode: DngPayloadMode::Unpacked16,
             auto_open_explorer: true,
             stretch_bake: false,
-            focus_fix: false,
+            focus_fix: FocusFixMode::Map,
             stretch_mode: 3,
             player_volume: 0.25,
             player_muted: true,
@@ -182,7 +200,7 @@ mod tests {
     fn save_and_load_file() {
         let dir = std::env::temp_dir().join(format!("cinefs-settings-test-{}", std::process::id()));
         let path = dir.join("settings.ini");
-        let s = Settings { focus_fix: false, stretch_mode: 2, ..Settings::default() };
+        let s = Settings { focus_fix: FocusFixMode::Off, stretch_mode: 2, ..Settings::default() };
         s.save(&path).unwrap();
         assert_eq!(Settings::load(&path), s);
         let _ = fs::remove_dir_all(&dir);

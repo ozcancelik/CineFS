@@ -72,6 +72,7 @@ struct MountedClipInfo: Codable, Identifiable {
     let whiteLevel: Int
     let levelSource: String
     let focusPixels: Int
+    let focusSource: String?
 }
 
 struct MountSummaryPayload: Codable {
@@ -598,11 +599,12 @@ final class MountManager: ObservableObject {
         cinefs_set_stretch_override(f)
     }
 
-    /// Focus-pixel (PDAF) correction for Canon 100D/650D/700D/EOS M clips mounted from now on.
-    @Published var focusFix: Bool = true {
+    /// Focus-pixel (PDAF) correction for Canon 100D/650D/700D/EOS M/EOS M2 clips mounted from now on.
+    /// 0 = Off, 1 = Auto (bundled map first, clip-learned fallback), 2 = Map only.
+    @Published var focusFixMode: Int = 1 {
         didSet {
-            cinefs_set_focus_fix(focusFix ? 1 : 0)
-            UserDefaults.standard.set(focusFix, forKey: Pref.focusFix)
+            cinefs_set_focus_fix(UInt32(focusFixMode))
+            UserDefaults.standard.set(focusFixMode, forKey: Pref.focusFix)
         }
     }
 
@@ -619,10 +621,14 @@ final class MountManager: ObservableObject {
         if let v = d.object(forKey: Pref.autoReveal) as? Bool { autoRevealInFinder = v }
         if let v = d.object(forKey: Pref.stretchBake) as? Bool { stretchBake = v }
         if let v = d.object(forKey: Pref.stretchOverride) as? Int, (0...4).contains(v) { stretchOverride = v }
-        if let v = d.object(forKey: Pref.focusFix) as? Bool { focusFix = v }
+        if let v = d.object(forKey: Pref.focusFix) as? Int, (0...2).contains(v) {
+            focusFixMode = v
+        } else if let b = d.object(forKey: Pref.focusFix) as? Bool {
+            focusFixMode = b ? 1 : 0
+        }
 
         cinefs_set_stretch_bake(stretchBake ? 1 : 0)
-        cinefs_set_focus_fix(focusFix ? 1 : 0)
+        cinefs_set_focus_fix(UInt32(focusFixMode))
         Self.applyStretchOverride(stretchOverride)
         resolveAppPath = detectResolveAppPath()
         statsTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
@@ -1100,14 +1106,15 @@ struct MainMountWindowView: View {
                 .frame(width: 170)
                 .help("Anamorphic crop_rec clips: bake the stretch into the DNG pixels (works in every app, ~3× data for 3x1) or only write the DefaultScale tag (fast). Applies to the next mount.")
 
-                Picker("Focus pixels", selection: $manager.focusFix) {
-                    Text("Fix").tag(true)
-                    Text("Off").tag(false)
+                Picker("Focus pixels", selection: $manager.focusFixMode) {
+                    Text("Auto").tag(1)
+                    Text("Map").tag(2)
+                    Text("Off").tag(0)
                 }
                 .pickerStyle(.menu)
                 .controlSize(.small)
-                .frame(width: 140)
-                .help("Canon 100D / 650D / 700D / EOS M: remove the bright PDAF dots. The dot pattern is learned from the clip; pixels are rewritten, so LJ92 passthrough is not used for those clips. Applies to the next mount.")
+                .frame(width: 148)
+                .help("Canon 100D / 650D / 700D / EOS M / EOS M2: remove PDAF dots. Auto uses bundled Magic Lantern focus maps first and falls back to learning the pattern from the clip; Map uses bundled maps only. Pixels are rewritten, so LJ92 passthrough is not used for those clips. Applies to the next mount.")
 
                 Picker("Override", selection: $manager.stretchOverride) {
                     Text("Auto").tag(0)
@@ -1376,7 +1383,7 @@ struct ClipTableView: View {
                     )
                     .frame(width: 118, alignment: .leading)
                     .help(clip.focusPixels > 0
-                        ? "Focus pixels (PDAF dots) corrected: \(clip.focusPixels) pixels per frame, learned from the clip. Pixels are rewritten, so LJ92 passthrough is not used."
+                        ? "Focus pixels (PDAF dots) corrected: \(clip.focusPixels) pixels per frame (\(clip.focusSource == "map" ? "from Magic Lantern focus map" : "learned from the clip")). Pixels are rewritten, so LJ92 passthrough is not used."
                         : "DNG payload mode")
 
                     Button {

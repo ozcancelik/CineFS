@@ -210,10 +210,11 @@ pub extern "C" fn cinefs_set_stretch_bake(on: u32) {
     crate::dng::set_stretch_bake(on != 0);
 }
 
-/// Enables (`1`, default) or disables (`0`) focus-pixel correction for clips opened afterwards.
+/// Sets focus-pixel correction mode for clips opened afterwards:
+/// `0` = Off, `1` = Auto (bundled map first, clip-learned fallback; default), `2` = Map only.
 #[no_mangle]
-pub extern "C" fn cinefs_set_focus_fix(on: u32) {
-    crate::focus_fix::set_focus_fix(on != 0);
+pub extern "C" fn cinefs_set_focus_fix(mode: u32) {
+    crate::focus_fix::set_focus_fix_mode(crate::focus_fix::FocusFixMode::from_u8(mode as u8));
 }
 
 /// Imports clip folders (newline-separated absolute paths) into DaVinci Resolve's Media Pool via

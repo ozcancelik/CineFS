@@ -49,9 +49,10 @@ mounts through the NFS client that is built into macOS.
 
 - **Magic Lantern `.MLV`:** there is no dual ISO processing, vertical stripe correction or
   bad/hot pixel correction yet.
-- **Focus pixel correction** is only applied to Canon bodies with phase-detect pixels in raw
-  video (100D, 650D, 700D, EOS M). The pixel positions are learned from the clip itself, so very
-  short or heavily textured clips may leave a few focus pixels uncorrected.
+- **Focus pixel correction** is applied to Canon bodies with phase-detect pixels in raw video
+  (100D, 650D, 700D, EOS M, EOS M2). In `Auto` mode CineFS uses bundled Magic Lantern focus-pixel
+  maps first and falls back to learning the lattice from the clip itself for unmapped readout modes
+  (where very short or heavily textured clips may leave a few focus pixels uncorrected).
 - **Blackmagic RAW `.braw` is experimental.** Black/white levels are approximated, white balance
   is estimated from the first frame (the camera's Kelvin/tint is not used) and the sensor is
   assumed to be Blackmagic Wide Gamut Gen4/5, so colour may not match Blackmagic's own software.

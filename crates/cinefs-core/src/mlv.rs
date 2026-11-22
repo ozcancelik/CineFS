@@ -216,13 +216,20 @@ pub struct MlvClip {
     pub fps_denom: u32,
     pub width: u32,
     pub height: u32,
+    /// Sensor readout buffer dimensions (`raw_info.width/height` from `RAWI`), used for matching
+    /// Magic Lantern focus-pixel maps.
+    pub raw_buffer_width: u32,
+    pub raw_buffer_height: u32,
+    /// Recorded window offset inside the sensor buffer (`panPosX/Y` from the first `VIDF`).
+    pub pan_x: u32,
+    pub pan_y: u32,
     pub bits_per_pixel: u32,
     pub black_level: i32,
     pub white_level: i32,
     /// Resolved (sanity-checked / OB-refined) levels actually written to the DNG.
     pub levels: crate::levels::ResolvedLevels,
-    /// Focus-pixel (PDAF) lattice learned from the clip, if the camera has such pixels.
-    pub focus_fix: Option<std::sync::Arc<crate::focus_fix::LatticeFix>>,
+    /// Focus-pixel (PDAF) correction (bundled map or clip-learned lattice), if active.
+    pub focus_fix: Option<std::sync::Arc<crate::focus_fix::FocusFix>>,
     pub active_area: [i32; 4],
     pub cfa_pattern: CfaPattern,
     pub camera_name: String,
@@ -353,6 +360,10 @@ impl MlvClip {
             fps_denom,
             width: 0,
             height: 0,
+            raw_buffer_width: 0,
+            raw_buffer_height: 0,
+            pan_x: 0,
+            pan_y: 0,
             bits_per_pixel: 16,
             black_level: 0,
             white_level: 16383,
@@ -545,6 +556,10 @@ impl MlvClip {
                             let frame_space = u32::from_le_bytes(vhdr[12..16].try_into().unwrap()) as u64;
                             let header_and_space = 32 + frame_space;
                             if bsize > header_and_space {
+                                if self.frames.is_empty() {
+                                    self.pan_x = u16::from_le_bytes([vhdr[8], vhdr[9]]) as u32;
+                                    self.pan_y = u16::from_le_bytes([vhdr[10], vhdr[11]]) as u32;
+                                }
                                 let payload_offset = offset + header_and_space;
                                 let payload_size = (bsize - header_and_space) as u32;
                                 let meta_idx = (self.dynamic_metas.len() - 1) as u16;
@@ -586,6 +601,12 @@ impl MlvClip {
                         if buf.len() >= 100 {
                             self.width = u16::from_le_bytes([buf[16], buf[17]]) as u32;
                             self.height = u16::from_le_bytes([buf[18], buf[19]]) as u32;
+                            let raw_h = i32::from_le_bytes(buf[28..32].try_into().unwrap());
+                            let raw_w = i32::from_le_bytes(buf[32..36].try_into().unwrap());
+                            if raw_w > 0 && raw_h > 0 {
+                                self.raw_buffer_width = raw_w as u32;
+                                self.raw_buffer_height = raw_h as u32;
+                            }
                             self.bits_per_pixel =
                                 i32::from_le_bytes(buf[44..48].try_into().unwrap()).max(8) as u32;
                             self.black_level = i32::from_le_bytes(buf[48..52].try_into().unwrap());
@@ -807,7 +828,7 @@ impl MlvClip {
             self.stretch_source = "RAWC";
         }
         self.levels = crate::levels::resolve(self);
-        self.focus_fix = crate::focus_fix::probe_clip(self).map(std::sync::Arc::new);
+        self.focus_fix = crate::focus_fix::resolve_clip(self).map(std::sync::Arc::new);
         crate::log::write(
             "INFO",
             &format!(

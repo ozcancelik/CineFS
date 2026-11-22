@@ -1,29 +1,69 @@
 //! Focus-pixel (PDAF) correction for Canon bodies whose sensor has phase-detect pixels
-//! (100D / 650D / 700D / EOS M).
+//! (100D / 650D / 700D / EOS M / EOS M2).
 //!
-//! The pixel positions are **learned from the clip itself**: [`probe_clip`] samples some frames,
-//! finds pixels that deviate from their same-colour neighbours in nearly every frame
-//! ([`crate::focus_probe`]), then [`fit_lattice`] recognises that those pixels sit on a periodic
-//! lattice (e.g. 8 px × 30 rows, several offsets per tile) inside a rectangular AF region.
-//! The correction then covers the *whole* lattice in that region, including pixels the probe
-//! missed because they were hidden by scene texture, and replaces each one with an
-//! edge-aware average of its same-colour neighbours. It must run on raw sensor data, *before*
-//! any stretch / resampling.
+//! Supports two sources under a unified [`FocusFix`]:
+//! 1. **Bundled Magic Lantern focus-pixel maps** ([`crate::focus_maps`]), matched instantly by
+//!    camera model ID and sensor readout buffer size (`RAWI` + `VIDF` pan offset).
+//! 2. **Clip-learned periodic lattice** ([`probe_clip`] + [`fit_lattice`]), which samples frames
+//!    from the clip itself as a fallback when no map matches the readout mode.
+//!
+//! In both cases each defect pixel is replaced with an edge-aware average of its same-colour
+//! neighbours in raw sensor space, *before* any stretch / resampling.
 
+use crate::focus_maps::{self, PixelMapFix};
 use crate::focus_probe::{decode_frame_u16, Candidate, ProbeAccum, ProbeConfig};
 use crate::mlv::MlvClip;
 use std::collections::HashSet;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicU8, Ordering};
 
-static FOCUS_FIX: AtomicBool = AtomicBool::new(true);
+/// How focus-pixel correction is resolved when opening a clip.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u8)]
+pub enum FocusFixMode {
+    /// Disabled.
+    Off = 0,
+    /// Use a bundled focus-pixel map when available, otherwise fall back to clip-learned detection.
+    Auto = 1,
+    /// Use bundled focus-pixel maps only (no clip probing).
+    Map = 2,
+}
 
-/// Enables / disables the focus-pixel correction for clips opened afterwards (default: on).
+impl FocusFixMode {
+    pub fn from_u8(v: u8) -> Self {
+        match v {
+            0 => Self::Off,
+            2 => Self::Map,
+            _ => Self::Auto,
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Off => "Off",
+            Self::Auto => "Auto",
+            Self::Map => "Map",
+        }
+    }
+}
+
+static FOCUS_FIX_MODE: AtomicU8 = AtomicU8::new(FocusFixMode::Auto as u8);
+
+/// Sets the focus-pixel correction mode for clips opened afterwards (default: [`FocusFixMode::Auto`]).
+pub fn set_focus_fix_mode(mode: FocusFixMode) {
+    FOCUS_FIX_MODE.store(mode as u8, Ordering::Relaxed);
+}
+
+pub fn focus_fix_mode() -> FocusFixMode {
+    FocusFixMode::from_u8(FOCUS_FIX_MODE.load(Ordering::Relaxed))
+}
+
+/// Enables (`Auto`) / disables (`Off`) focus-pixel correction for clips opened afterwards.
 pub fn set_focus_fix(on: bool) {
-    FOCUS_FIX.store(on, Ordering::Relaxed);
+    set_focus_fix_mode(if on { FocusFixMode::Auto } else { FocusFixMode::Off });
 }
 
 pub fn focus_fix_enabled() -> bool {
-    FOCUS_FIX.load(Ordering::Relaxed)
+    focus_fix_mode() != FocusFixMode::Off
 }
 
 /// Bodies whose sensors have focus pixels visible in raw video. Matched against the IDNT name.
@@ -32,6 +72,142 @@ pub fn camera_has_focus_pixels(camera_name: &str) -> bool {
     ["EOS M", "650D", "700D", "100D", "REBEL T4I", "REBEL T5I", "REBEL SL1", "KISS X6I", "KISS X7I", "KISS X7"]
         .iter()
         .any(|k| n.contains(k))
+}
+
+/// Resolved focus-pixel correction for one clip: either a bundled map or a clip-learned lattice.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum FocusFix {
+    Map(PixelMapFix),
+    Lattice(LatticeFix),
+}
+
+impl FocusFix {
+    /// `"map"` for a bundled Magic Lantern focus-pixel map, `"detected"` for clip-learned lattice.
+    pub fn source(&self) -> &'static str {
+        match self {
+            Self::Map(_) => "map",
+            Self::Lattice(_) => "detected",
+        }
+    }
+
+    #[inline]
+    pub fn is_defect(&self, x: u32, y: u32) -> bool {
+        match self {
+            Self::Map(m) => m.is_defect(x, y),
+            Self::Lattice(l) => l.is_defect(x, y),
+        }
+    }
+
+    pub fn pixel_count(&self) -> usize {
+        match self {
+            Self::Map(m) => m.pixel_count(),
+            Self::Lattice(l) => l.pixel_count(),
+        }
+    }
+
+    fn for_each_defect(&self, f: impl FnMut(u32, u32)) {
+        match self {
+            Self::Map(m) => m.for_each_defect(f),
+            Self::Lattice(l) => l.for_each_defect(f),
+        }
+    }
+
+    /// Corrects the defect pixels of one host-order `u16` frame (GPU player path).
+    pub fn apply_u16(&self, buf: &mut [u16], w: usize, h: usize) {
+        apply_u16_with(buf, w, h, |x, y| self.is_defect(x, y), |f| self.for_each_defect(f));
+    }
+
+    /// Corrects the defect pixels of one little-endian `u16` frame in place (DNG path).
+    pub fn apply_le(&self, buf: &mut [u8], w: usize, h: usize) {
+        apply_le_with(buf, w, h, |x, y| self.is_defect(x, y), |f| self.for_each_defect(f));
+    }
+}
+
+fn apply_u16_with(
+    buf: &mut [u16],
+    w: usize,
+    h: usize,
+    is_defect: impl Fn(u32, u32) -> bool,
+    for_each: impl FnOnce(&mut dyn FnMut(u32, u32)),
+) {
+    if buf.len() < w * h || w < 9 || h < 9 {
+        return;
+    }
+    let mut fix_one = |dx: u32, dy: u32| {
+        let (x, y) = (dx as usize, dy as usize);
+        if x >= w || y >= h {
+            return;
+        }
+        let mut best: Option<(i32, i32)> = None;
+        for d in [2usize, 4] {
+            let mut consider = |a: Option<(usize, usize)>, b: Option<(usize, usize)>| {
+                if let (Some((ax, ay)), Some((bx, by))) = (a, b) {
+                    if !is_defect(ax as u32, ay as u32) && !is_defect(bx as u32, by as u32) {
+                        let (va, vb) = (buf[ay * w + ax] as i32, buf[by * w + bx] as i32);
+                        let cand = ((va - vb).abs(), (va + vb + 1) / 2);
+                        if best.map_or(true, |b| cand.0 < b.0) {
+                            best = Some(cand);
+                        }
+                    }
+                }
+            };
+            consider(x.checked_sub(d).map(|nx| (nx, y)), (x + d < w).then_some((x + d, y)));
+            consider(y.checked_sub(d).map(|ny| (x, ny)), (y + d < h).then_some((x, y + d)));
+            if best.is_some() {
+                break;
+            }
+        }
+        if let Some((_, avg)) = best {
+            buf[y * w + x] = avg.clamp(0, 65535) as u16;
+        }
+    };
+    for_each(&mut fix_one);
+}
+
+fn apply_le_with(
+    buf: &mut [u8],
+    w: usize,
+    h: usize,
+    is_defect: impl Fn(u32, u32) -> bool,
+    for_each: impl FnOnce(&mut dyn FnMut(u32, u32)),
+) {
+    if buf.len() < w * h * 2 || w < 9 || h < 9 {
+        return;
+    }
+    let get = |b: &[u8], x: usize, y: usize| -> i32 {
+        let i = (y * w + x) * 2;
+        u16::from_le_bytes([b[i], b[i + 1]]) as i32
+    };
+    let mut fix_one = |dx: u32, dy: u32| {
+        let (x, y) = (dx as usize, dy as usize);
+        if x >= w || y >= h {
+            return;
+        }
+        let mut best: Option<(i32, i32)> = None;
+        for d in [2usize, 4] {
+            let mut consider = |a: Option<(usize, usize)>, b: Option<(usize, usize)>| {
+                if let (Some((ax, ay)), Some((bx, by))) = (a, b) {
+                    if !is_defect(ax as u32, ay as u32) && !is_defect(bx as u32, by as u32) {
+                        let (va, vb) = (get(buf, ax, ay), get(buf, bx, by));
+                        let cand = ((va - vb).abs(), (va + vb + 1) / 2);
+                        if best.map_or(true, |b| cand.0 < b.0) {
+                            best = Some(cand);
+                        }
+                    }
+                }
+            };
+            consider(x.checked_sub(d).map(|nx| (nx, y)), (x + d < w).then_some((x + d, y)));
+            consider(y.checked_sub(d).map(|ny| (x, ny)), (y + d < h).then_some((x, y + d)));
+            if best.is_some() {
+                break;
+            }
+        }
+        if let Some((_, avg)) = best {
+            let i = (y * w + x) * 2;
+            buf[i..i + 2].copy_from_slice(&(avg.clamp(0, 65535) as u16).to_le_bytes());
+        }
+    };
+    for_each(&mut fix_one);
 }
 
 /// Rectangular region (inclusive) in which a periodic focus-pixel lattice lives.
@@ -95,85 +271,12 @@ impl LatticeFix {
 
     /// Same correction as [`apply_le`](Self::apply_le) for host-order `u16` samples (GPU player path).
     pub fn apply_u16(&self, buf: &mut [u16], w: usize, h: usize) {
-        if buf.len() < w * h || w < 9 || h < 9 {
-            return;
-        }
-        self.for_each_defect(|dx, dy| {
-            let (x, y) = (dx as usize, dy as usize);
-            if x >= w || y >= h {
-                return;
-            }
-            let mut best: Option<(i32, i32)> = None;
-            for d in [2usize, 4] {
-                let mut consider = |a: Option<(usize, usize)>, b: Option<(usize, usize)>| {
-                    if let (Some((ax, ay)), Some((bx, by))) = (a, b) {
-                        if !self.is_defect(ax as u32, ay as u32) && !self.is_defect(bx as u32, by as u32) {
-                            let (va, vb) = (buf[ay * w + ax] as i32, buf[by * w + bx] as i32);
-                            let cand = ((va - vb).abs(), (va + vb + 1) / 2);
-                            if best.map_or(true, |b| cand.0 < b.0) {
-                                best = Some(cand);
-                            }
-                        }
-                    }
-                };
-                consider(x.checked_sub(d).map(|nx| (nx, y)), (x + d < w).then_some((x + d, y)));
-                consider(y.checked_sub(d).map(|ny| (x, ny)), (y + d < h).then_some((x, y + d)));
-                if best.is_some() {
-                    break;
-                }
-            }
-            if let Some((_, avg)) = best {
-                buf[y * w + x] = avg.clamp(0, 65535) as u16;
-            }
-        });
+        apply_u16_with(buf, w, h, |x, y| self.is_defect(x, y), |f| self.for_each_defect(f));
     }
 
     /// Corrects the lattice pixels of one frame (`w*h` little-endian `u16` samples) in place.
     pub fn apply_le(&self, buf: &mut [u8], w: usize, h: usize) {
-        if buf.len() < w * h * 2 || w < 9 || h < 9 {
-            return;
-        }
-        let get = |b: &[u8], x: usize, y: usize| -> i32 {
-            let i = (y * w + x) * 2;
-            u16::from_le_bytes([b[i], b[i + 1]]) as i32
-        };
-        // x/y are validated against the frame below.
-        self.for_each_defect(|dx, dy| {
-            let (x, y) = (dx as usize, dy as usize);
-            if x >= w || y >= h {
-                return;
-            }
-            // Same-colour neighbours sit 2 (then 4) pixels away; skip any that are defects too.
-            let mut best: Option<(i32, i32)> = None; // (|difference|, average)
-            for d in [2usize, 4] {
-                let mut consider = |a: Option<(usize, usize)>, b: Option<(usize, usize)>| {
-                    if let (Some((ax, ay)), Some((bx, by))) = (a, b) {
-                        if !self.is_defect(ax as u32, ay as u32) && !self.is_defect(bx as u32, by as u32) {
-                            let (va, vb) = (get(buf, ax, ay), get(buf, bx, by));
-                            let cand = ((va - vb).abs(), (va + vb + 1) / 2);
-                            if best.map_or(true, |b| cand.0 < b.0) {
-                                best = Some(cand);
-                            }
-                        }
-                    }
-                };
-                consider(
-                    x.checked_sub(d).map(|nx| (nx, y)),
-                    (x + d < w).then_some((x + d, y)),
-                );
-                consider(
-                    y.checked_sub(d).map(|ny| (x, ny)),
-                    (y + d < h).then_some((x, y + d)),
-                );
-                if best.is_some() {
-                    break;
-                }
-            }
-            if let Some((_, avg)) = best {
-                let i = (y * w + x) * 2;
-                buf[i..i + 2].copy_from_slice(&(avg.clamp(0, 65535) as u16).to_le_bytes());
-            }
-        });
+        apply_le_with(buf, w, h, |x, y| self.is_defect(x, y), |f| self.for_each_defect(f));
     }
 }
 
@@ -239,6 +342,51 @@ pub fn fit_lattice(cands: &[Candidate], w: usize, h: usize) -> Option<LatticeFix
     let x1 = (x1 + px).min(w as u32 - 3);
     let y1 = (y1 + py).min(h as u32 - 3);
     Some(LatticeFix::new(px, py, cells, x0, x1, y0, y1))
+}
+
+/// Resolves the focus-pixel fix for `clip` according to the active [`FocusFixMode`]:
+/// - `Off`: returns `None`.
+/// - `Map`: uses a bundled Magic Lantern focus-pixel map if one matches, otherwise `None`.
+/// - `Auto`: tries a bundled focus-pixel map first, falling back to [`probe_clip`] if none matches.
+pub fn resolve_clip(clip: &MlvClip) -> Option<FocusFix> {
+    let mode = focus_fix_mode();
+    if mode == FocusFixMode::Off || clip.is_codec_decoded() {
+        return None;
+    }
+    if let Some(map) = focus_maps::lookup_for_clip(clip) {
+        let raw_w = if clip.raw_buffer_width > 0 { clip.raw_buffer_width } else { clip.width };
+        let raw_h = if clip.raw_buffer_height > 0 { clip.raw_buffer_height } else { clip.height };
+        crate::log::write(
+            "INFO",
+            &format!(
+                "clip '{}': focus pixels: matched bundled map {:x}_{}x{} (pan {},{}) -> {} pixels corrected",
+                clip.base_name,
+                clip.camera_model_id,
+                raw_w,
+                raw_h,
+                clip.pan_x,
+                clip.pan_y,
+                map.pixel_count()
+            ),
+        );
+        return Some(FocusFix::Map(map));
+    }
+    if mode == FocusFixMode::Map {
+        if camera_has_focus_pixels(&clip.camera_name) {
+            crate::log::write(
+                "INFO",
+                &format!(
+                    "clip '{}': focus pixels: mode=Map and no bundled map for {:x}_{}x{} -> no correction",
+                    clip.base_name,
+                    clip.camera_model_id,
+                    if clip.raw_buffer_width > 0 { clip.raw_buffer_width } else { clip.width },
+                    if clip.raw_buffer_height > 0 { clip.raw_buffer_height } else { clip.height },
+                ),
+            );
+        }
+        return None;
+    }
+    probe_clip(clip).map(FocusFix::Lattice)
 }
 
 /// Learns the focus-pixel lattice of `clip` from the clip's own frames. `None` when the camera has

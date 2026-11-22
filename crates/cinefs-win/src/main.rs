@@ -173,7 +173,7 @@ mod win_gui {
     fn load_and_apply_settings() -> crate::settings::Settings {
         let s = crate::settings::Settings::load(&settings_path());
         cinefs_core::dng::set_stretch_bake(s.stretch_bake);
-        cinefs_core::focus_fix::set_focus_fix(s.focus_fix);
+        cinefs_core::focus_fix::set_focus_fix_mode(s.focus_fix);
         STRETCH_MODE.store(s.stretch_mode, std::sync::atomic::Ordering::Relaxed);
         cinefs_core::mlv::set_stretch_override(stretch_override_for(s.stretch_mode));
         s
@@ -193,7 +193,7 @@ mod win_gui {
         s.mode = mode;
         s.auto_open_explorer = auto_open_explorer;
         s.stretch_bake = cinefs_core::dng::stretch_bake();
-        s.focus_fix = cinefs_core::focus_fix::focus_fix_enabled();
+        s.focus_fix = cinefs_core::focus_fix::focus_fix_mode();
         s.stretch_mode = STRETCH_MODE.load(std::sync::atomic::Ordering::Relaxed);
         if let Err(e) = s.save(&settings_path()) {
             cinefs_core::log_warn!("Could not save settings: {e}");
@@ -213,8 +213,9 @@ mod win_gui {
     // Footer settings menus (same choices as the macOS footer pickers).
     const ID_BAKE_ON: usize = 310;
     const ID_BAKE_OFF: usize = 311;
-    const ID_FOCUS_ON: usize = 320;
-    const ID_FOCUS_OFF: usize = 321;
+    const ID_FOCUS_AUTO: usize = 320;
+    const ID_FOCUS_MAP: usize = 321;
+    const ID_FOCUS_OFF: usize = 322;
     /// `ID_OVERRIDE_BASE + stretch mode` (0..=4).
     const ID_OVERRIDE_BASE: usize = 330;
 
@@ -242,15 +243,21 @@ mod win_gui {
         );
     }
 
-    unsafe fn apply_focus_fix(hwnd: *mut c_void, on: bool) {
-        cinefs_core::focus_fix::set_focus_fix(on);
+    unsafe fn apply_focus_fix(hwnd: *mut c_void, mode: cinefs_core::focus_fix::FocusFixMode) {
+        cinefs_core::focus_fix::set_focus_fix_mode(mode);
         persist_settings();
+        let desc = match mode {
+            cinefs_core::focus_fix::FocusFixMode::Auto => {
+                "Auto (bundled focus maps first, clip-learned fallback; no LJ92 passthrough)"
+            }
+            cinefs_core::focus_fix::FocusFixMode::Map => {
+                "Map only (bundled Magic Lantern focus maps; no LJ92 passthrough)"
+            }
+            cinefs_core::focus_fix::FocusFixMode::Off => "off",
+        };
         set_status(
             hwnd,
-            format!(
-                "Focus pixels: {} — applies to clips mounted from now on.",
-                if on { "PDAF dots are corrected (pixels rewritten, no LJ92 passthrough)" } else { "off" }
-            ),
+            format!("Focus pixels: {desc} — applies to clips mounted from now on."),
             false,
         );
     }
@@ -2242,10 +2249,10 @@ mod win_gui {
         });
         AppendMenuW(menu, MF_STRING, ID_TRAY_BAKE, s_bake.as_ptr());
         AppendMenuW(menu, MF_STRING, ID_TRAY_STRETCH, s_str.as_ptr());
-        let s_fp = wstr(if cinefs_core::focus_fix::focus_fix_enabled() {
-            "Focus pixels: Fix PDAF dots (EOS M / 650D / 700D / 100D)  (click to change)"
-        } else {
-            "Focus pixels: Off  (click to change)"
+        let s_fp = wstr(match cinefs_core::focus_fix::focus_fix_mode() {
+            cinefs_core::focus_fix::FocusFixMode::Auto => "Focus pixels: Auto (map + detect fallback)  (click to change)",
+            cinefs_core::focus_fix::FocusFixMode::Map => "Focus pixels: Map only  (click to change)",
+            cinefs_core::focus_fix::FocusFixMode::Off => "Focus pixels: Off  (click to change)",
         });
         AppendMenuW(menu, MF_STRING, ID_TRAY_FOCUS, s_fp.as_ptr());
 
@@ -3728,11 +3735,11 @@ mod win_gui {
             let sy = fy + (settings_h - sh) / 2 + scale_dpi(2, dpi);
             let gap = scale_dpi(8, dpi);
             let bake = cinefs_core::dng::stretch_bake();
-            let focus = cinefs_core::focus_fix::focus_fix_enabled();
+            let focus = cinefs_core::focus_fix::focus_fix_mode();
             let mode = STRETCH_MODE.load(std::sync::atomic::Ordering::Relaxed);
             let buttons = [
                 (format!("Stretch: {}", if bake { "Baked into DNG" } else { "Metadata only" }), 172, HitAction::StretchMethodMenu),
-                (format!("Focus pixels: {}", if focus { "Fix" } else { "Off" }), 132, HitAction::FocusPixelsMenu),
+                (format!("Focus pixels: {}", focus.label()), 140, HitAction::FocusPixelsMenu),
                 (format!("Override: {}", stretch_mode_short(mode)), 176, HitAction::StretchOverrideMenu),
             ];
             let mut x = pad_x;
@@ -4032,13 +4039,26 @@ mod win_gui {
                         );
                     }
                     HitAction::FocusPixelsMenu => {
-                        let on = cinefs_core::focus_fix::focus_fix_enabled();
+                        let cur = cinefs_core::focus_fix::focus_fix_mode();
                         show_choice_popup(
                             hwnd,
                             rc,
                             &[
-                                (ID_FOCUS_ON, "Fix PDAF dots (EOS M / 100D / 650D / 700D)", on),
-                                (ID_FOCUS_OFF, "Off", !on),
+                                (
+                                    ID_FOCUS_AUTO,
+                                    "Auto (focus map first, detect fallback)",
+                                    cur == cinefs_core::focus_fix::FocusFixMode::Auto,
+                                ),
+                                (
+                                    ID_FOCUS_MAP,
+                                    "Map only (Magic Lantern focus maps)",
+                                    cur == cinefs_core::focus_fix::FocusFixMode::Map,
+                                ),
+                                (
+                                    ID_FOCUS_OFF,
+                                    "Off",
+                                    cur == cinefs_core::focus_fix::FocusFixMode::Off,
+                                ),
                             ],
                         );
                     }
@@ -4426,12 +4446,21 @@ mod win_gui {
                     ID_TRAY_RESOLVE_ALL => import_to_resolve(hwnd, None, None),
                     ID_TRAY_UNMOUNT_ALL => unmount_all(hwnd),
                     ID_TRAY_BAKE => apply_stretch_bake(hwnd, !cinefs_core::dng::stretch_bake()),
-                    ID_TRAY_FOCUS => apply_focus_fix(hwnd, !cinefs_core::focus_fix::focus_fix_enabled()),
+                    ID_TRAY_FOCUS => {
+                        let next = match cinefs_core::focus_fix::focus_fix_mode() {
+                            cinefs_core::focus_fix::FocusFixMode::Auto => cinefs_core::focus_fix::FocusFixMode::Map,
+                            cinefs_core::focus_fix::FocusFixMode::Map => cinefs_core::focus_fix::FocusFixMode::Off,
+                            cinefs_core::focus_fix::FocusFixMode::Off => cinefs_core::focus_fix::FocusFixMode::Auto,
+                        };
+                        apply_focus_fix(hwnd, next);
+                    }
                     ID_TRAY_STRETCH => {
                         apply_stretch_mode(hwnd, (STRETCH_MODE.load(std::sync::atomic::Ordering::Relaxed) + 1) % 5)
                     }
                     ID_BAKE_ON | ID_BAKE_OFF => apply_stretch_bake(hwnd, id == ID_BAKE_ON),
-                    ID_FOCUS_ON | ID_FOCUS_OFF => apply_focus_fix(hwnd, id == ID_FOCUS_ON),
+                    ID_FOCUS_AUTO => apply_focus_fix(hwnd, cinefs_core::focus_fix::FocusFixMode::Auto),
+                    ID_FOCUS_MAP => apply_focus_fix(hwnd, cinefs_core::focus_fix::FocusFixMode::Map),
+                    ID_FOCUS_OFF => apply_focus_fix(hwnd, cinefs_core::focus_fix::FocusFixMode::Off),
                     _ if (ID_OVERRIDE_BASE..ID_OVERRIDE_BASE + 5).contains(&id) => {
                         apply_stretch_mode(hwnd, (id - ID_OVERRIDE_BASE) as u8)
                     }

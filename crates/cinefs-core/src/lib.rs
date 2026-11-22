@@ -10,6 +10,7 @@ pub mod color_matrices;
 pub mod dng;
 pub mod ffi;
 pub mod focus_fix;
+pub mod focus_maps;
 pub mod focus_probe;
 pub mod levels;
 pub mod lj92;
