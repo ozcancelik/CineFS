@@ -304,8 +304,13 @@ impl Engine {
 
 impl Drop for Engine {
     fn drop(&mut self) {
-        self.shared.stop.store(true, Ordering::SeqCst);
-        self.shared.cv.notify_all();
+        // Hold `state` while setting `stop` and notifying so no worker can slip
+        // between checking `stop` and entering `cv.wait` (lost-wakeup deadlock).
+        {
+            let _guard = self.shared.state.lock().unwrap();
+            self.shared.stop.store(true, Ordering::SeqCst);
+            self.shared.cv.notify_all();
+        }
         for w in self.workers.drain(..) {
             let _ = w.join();
         }
