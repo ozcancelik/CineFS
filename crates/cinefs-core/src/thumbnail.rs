@@ -197,6 +197,60 @@ pub fn render(clip: &MlvClip, max_width: usize) -> Result<Thumbnail> {
     render_frame(clip, clip.frames.len() / 2, max_width)
 }
 
+/// Renders the middle frame of `clip` using the active [`crate::vfs::ClipRuntime`].
+pub fn render_with_runtime(
+    clip: &MlvClip,
+    rt: &crate::vfs::ClipRuntime,
+    max_width: usize,
+) -> Result<Thumbnail> {
+    render_frame_with_runtime(clip, rt, clip.frames.len() / 2, max_width)
+}
+
+/// Same as [`render_with_runtime`] for an arbitrary frame (for hover scrubbing).
+pub fn render_frame_with_runtime(
+    clip: &MlvClip,
+    rt: &crate::vfs::ClipRuntime,
+    frame_index: usize,
+    max_width: usize,
+) -> Result<Thumbnail> {
+    let idx = frame_index.min(clip.frames.len().saturating_sub(1));
+    let mut src = decode_frame_u16(clip, idx)?;
+    let (w, h) = (clip.width as usize, clip.height as usize);
+    if let Some(fix) = &rt.focus_fix {
+        fix.apply_u16_ex(&mut src, w, h, rt.dual_iso.is_some());
+    }
+    if let Some(bp) = &rt.bad_pixels {
+        bp.apply_u16_ex(&mut src, w, h, rt.dual_iso.is_some());
+    }
+    let (black, white) = if let Some(diso) = &rt.dual_iso {
+        diso.apply_u16(&mut src, w, h);
+        (0.0f32, 65535.0f32)
+    } else {
+        (clip.levels.black as f32, clip.levels.white as f32)
+    };
+    if let Some(st) = &rt.stripes {
+        st.apply_u16(&mut src, w, h);
+    }
+    let meta = clip
+        .frames
+        .get(idx)
+        .and_then(|f| clip.dynamic_metas.get(f.meta_idx as usize))
+        .or_else(|| clip.dynamic_metas.first());
+    let gains = meta.map(|m| [m.wb_gain_r, m.wb_gain_g, m.wb_gain_b]).unwrap_or([1.0; 3]);
+    Ok(render_from_bayer(
+        &src,
+        w,
+        h,
+        clip.cfa_pattern,
+        black,
+        white,
+        gains,
+        rt.stretch_y,
+        camera_to_rec709(&clip.color_matrix1, clip.forward_matrix1.as_ref(), gains),
+        max_width,
+    ))
+}
+
 /// Same as [`render`] for an arbitrary frame (clamped to the clip's range); used for hover scrubbing.
 pub fn render_frame(clip: &MlvClip, frame_index: usize, max_width: usize) -> Result<Thumbnail> {
     let idx = frame_index.min(clip.frames.len().saturating_sub(1));

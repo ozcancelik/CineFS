@@ -290,6 +290,33 @@ fn stretch_override() -> Option<f64> {
     }
 }
 
+/// Maps UI stretch override index (`0=Auto, 1=Off, 2=H×3, 3=V×1.67, 4=V×3`) to a `stretch_y` factor.
+pub fn stretch_override_factor(mode: u8) -> Option<f64> {
+    match mode {
+        1 => Some(1.0),
+        2 => Some(1.0 / 3.0),
+        3 => Some(5.0 / 3.0),
+        4 => Some(3.0),
+        _ => None,
+    }
+}
+
+/// Returns the current global stretch override as a UI mode index (`0..=4`).
+pub fn stretch_override_mode() -> u8 {
+    let Some(f) = stretch_override() else { return 0 };
+    if (f - 1.0).abs() < 0.02 {
+        1
+    } else if (f - 1.0 / 3.0).abs() < 0.02 {
+        2
+    } else if (f - 5.0 / 3.0).abs() < 0.05 {
+        3
+    } else if (f - 3.0).abs() < 0.05 {
+        4
+    } else {
+        0
+    }
+}
+
 /// Same rule as MLV App's `getMlvAspectRatio`: `(binning_y+skipping_y) / (binning_x+skipping_x)`,
 /// snapped to the standard 1.0 / 1.67 / 3.0 factors. Returns 1.0 when unknown.
 pub fn stretch_from_sampling(s: [u8; 4]) -> f64 {

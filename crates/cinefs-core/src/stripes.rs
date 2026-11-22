@@ -256,7 +256,23 @@ pub fn calibrate_from_frames(
 /// Runs after `dual_iso` calibration so if Dual ISO is active, stripes are calibrated in the
 /// reconstructed 16-bit linear space (`black = 0`, `white = 65535`).
 pub fn calibrate_clip(clip: &MlvClip) -> Option<StripeFix> {
-    let mode = stripe_mode();
+    calibrate_clip_with_mode(
+        clip,
+        stripe_mode(),
+        clip.focus_fix.as_deref(),
+        clip.bad_pixels.as_deref(),
+        clip.dual_iso.as_deref(),
+    )
+}
+
+/// Same as [`calibrate_clip`] with explicit mode and upstream fixes (used for live per-clip overrides).
+pub fn calibrate_clip_with_mode(
+    clip: &MlvClip,
+    mode: StripeMode,
+    focus_fix: Option<&crate::focus_fix::FocusFix>,
+    bad_pixels: Option<&crate::bad_pixels::BadPixelFix>,
+    dual_iso: Option<&crate::dual_iso::DualIsoCalibration>,
+) -> Option<StripeFix> {
     if mode == StripeMode::Off || clip.is_codec_decoded() {
         return None;
     }
@@ -272,10 +288,6 @@ pub fn calibrate_clip(clip: &MlvClip) -> Option<StripeFix> {
     } else {
         (0..want).map(|i| i * (n - 1) / (want - 1)).collect()
     };
-
-    let dual_iso = clip.dual_iso.as_deref();
-    let focus_fix = clip.focus_fix.as_deref();
-    let bad_pixels = clip.bad_pixels.as_deref();
 
     let mut decoded: Vec<Vec<u16>> = Vec::with_capacity(picks.len());
     for idx in picks {

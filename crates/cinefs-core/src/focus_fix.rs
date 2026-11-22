@@ -364,7 +364,11 @@ pub fn fit_lattice(cands: &[Candidate], w: usize, h: usize) -> Option<LatticeFix
 /// - `Map`: uses a bundled Magic Lantern focus-pixel map if one matches, otherwise `None`.
 /// - `Auto`: tries a bundled focus-pixel map first, falling back to [`probe_clip`] if none matches.
 pub fn resolve_clip(clip: &MlvClip) -> Option<FocusFix> {
-    let mode = focus_fix_mode();
+    resolve_clip_with_mode(clip, focus_fix_mode())
+}
+
+/// Same as [`resolve_clip`] using an explicit [`FocusFixMode`] (used for live per-clip overrides).
+pub fn resolve_clip_with_mode(clip: &MlvClip, mode: FocusFixMode) -> Option<FocusFix> {
     if mode == FocusFixMode::Off || clip.is_codec_decoded() {
         return None;
     }
@@ -401,13 +405,20 @@ pub fn resolve_clip(clip: &MlvClip) -> Option<FocusFix> {
         }
         return None;
     }
-    probe_clip(clip).map(FocusFix::Lattice)
+    probe_clip_unconditional(clip).map(FocusFix::Lattice)
 }
 
 /// Learns the focus-pixel lattice of `clip` from the clip's own frames. `None` when the camera has
 /// no focus pixels, the feature is off, or no convincing lattice is found.
 pub fn probe_clip(clip: &MlvClip) -> Option<LatticeFix> {
-    if !focus_fix_enabled() || clip.is_codec_decoded() || !camera_has_focus_pixels(&clip.camera_name) {
+    if !focus_fix_enabled() {
+        return None;
+    }
+    probe_clip_unconditional(clip)
+}
+
+fn probe_clip_unconditional(clip: &MlvClip) -> Option<LatticeFix> {
+    if clip.is_codec_decoded() || !camera_has_focus_pixels(&clip.camera_name) {
         return None;
     }
     let (w, h) = (clip.width as usize, clip.height as usize);

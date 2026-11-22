@@ -22,6 +22,158 @@ struct ResolveResultPayload: Codable {
 /// One accent colour (CineFS amber); colour is used only where it carries meaning.
 enum Tone { case neutral, good, accent }
 
+/// Clickable payload/processing pill that opens a live per-clip RAW override popover.
+struct ClipSettingsPill: View {
+    @ObservedObject var item: ActiveMountItem
+    let clipIndex: Int
+    let clip: MountedClipInfo
+    let pillText: String
+    let pillHelp: String
+    let tone: Tone
+
+    @State private var showPopover = false
+    @State private var stretchBake: Bool = true
+    @State private var stretchOverride: Int = 0
+    @State private var focusMode: Int = 1
+    @State private var dualIsoMode: Int = 1
+    @State private var badPixelsMode: Int = 1
+    @State private var stripeMode: Int = 1
+
+    private func syncFromClip() {
+        stretchBake = clip.stretchBaked
+        stretchOverride = clip.stretchOverride ?? 0
+        focusMode = clip.focusMode ?? 1
+        dualIsoMode = clip.dualIsoMode ?? 1
+        badPixelsMode = clip.badPixelsMode ?? 1
+        stripeMode = clip.stripeMode ?? 1
+    }
+
+    private func apply() {
+        guard showPopover else { return }
+        item.reconfigureClip(
+            index: clipIndex,
+            stretchBake: stretchBake,
+            stretchOverride: stretchOverride,
+            focusMode: focusMode,
+            dualIsoMode: dualIsoMode,
+            badPixelsMode: badPixelsMode,
+            stripeMode: stripeMode
+        )
+    }
+
+    var body: some View {
+        Button {
+            syncFromClip()
+            showPopover.toggle()
+        } label: {
+            HStack(spacing: 4) {
+                Pill(text: pillText, tone: tone)
+                Image(systemName: "slider.horizontal.3")
+                    .font(.system(size: 9))
+                    .foregroundStyle(.tertiary)
+            }
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .help(pillHelp + " Click to adjust RAW settings for this clip live.")
+        .popover(isPresented: $showPopover, arrowEdge: .trailing) {
+            popoverContent
+        }
+    }
+
+    private func row<C: View>(_ title: String, @ViewBuilder content: () -> C) -> some View {
+        HStack {
+            Text(title)
+                .font(.system(size: 11.5))
+                .foregroundStyle(.secondary)
+                .frame(width: 96, alignment: .leading)
+            content()
+                .frame(width: 136, alignment: .leading)
+        }
+    }
+
+    private var popoverContent: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            VStack(alignment: .leading, spacing: 2) {
+                Text(clip.folderName)
+                    .font(.system(size: 11.5, weight: .semibold, design: .monospaced))
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                Text("Live RAW overrides for this clip only")
+                    .font(.system(size: 10.5))
+                    .foregroundStyle(.secondary)
+            }
+
+            Divider()
+
+            VStack(alignment: .leading, spacing: 7) {
+                row("Focus pixels") {
+                    Picker("", selection: $focusMode) {
+                        Text("Auto").tag(1)
+                        Text("Map").tag(2)
+                        Text("Off").tag(0)
+                    }
+                    .labelsHidden().pickerStyle(.menu).controlSize(.small)
+                    .onChange(of: focusMode) { _ in apply() }
+                }
+                row("Dual ISO") {
+                    Picker("", selection: $dualIsoMode) {
+                        Text("Auto").tag(1)
+                        Text("Off").tag(0)
+                    }
+                    .labelsHidden().pickerStyle(.menu).controlSize(.small)
+                    .onChange(of: dualIsoMode) { _ in apply() }
+                }
+                row("Hot pixels") {
+                    Picker("", selection: $badPixelsMode) {
+                        Text("Auto").tag(1)
+                        Text("Off").tag(0)
+                    }
+                    .labelsHidden().pickerStyle(.menu).controlSize(.small)
+                    .onChange(of: badPixelsMode) { _ in apply() }
+                }
+                row("Vertical stripes") {
+                    Picker("", selection: $stripeMode) {
+                        Text("Auto").tag(1)
+                        Text("Force").tag(2)
+                        Text("Off").tag(0)
+                    }
+                    .labelsHidden().pickerStyle(.menu).controlSize(.small)
+                    .onChange(of: stripeMode) { _ in apply() }
+                }
+                row("Stretch") {
+                    Picker("", selection: $stretchBake) {
+                        Text("Baked into DNG").tag(true)
+                        Text("Metadata only").tag(false)
+                    }
+                    .labelsHidden().pickerStyle(.menu).controlSize(.small)
+                    .onChange(of: stretchBake) { _ in apply() }
+                }
+                row("Override") {
+                    Picker("", selection: $stretchOverride) {
+                        Text("Auto").tag(0)
+                        Text("Off").tag(1)
+                        Text("Horizontal ×3").tag(2)
+                        Text("Vertical ×1.67").tag(3)
+                        Text("Vertical ×3").tag(4)
+                    }
+                    .labelsHidden().pickerStyle(.menu).controlSize(.small)
+                    .onChange(of: stretchOverride) { _ in apply() }
+                }
+            }
+
+            Divider()
+
+            Text("Changes take effect immediately here. If already imported in DaVinci Resolve, refresh or re-import this clip.")
+                .font(.system(size: 10))
+                .foregroundStyle(.tertiary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .padding(12)
+        .frame(width: 268)
+    }
+}
+
 struct Pill: View {
     let text: String
     var tone: Tone = .neutral
@@ -77,6 +229,11 @@ struct MountedClipInfo: Codable, Identifiable {
     let hotPixels: Int?
     let deadPixels: Int?
     let stripeGainPct: Double?
+    let stretchOverride: Int?
+    let focusMode: Int?
+    let dualIsoMode: Int?
+    let badPixelsMode: Int?
+    let stripeMode: Int?
 }
 
 struct MountSummaryPayload: Codable {
@@ -96,6 +253,8 @@ final class ActiveMountItem: Identifiable, ObservableObject {
     let summary: MountSummaryPayload
     let mountedAt = Date()
 
+    @Published var clips: [MountedClipInfo]
+    @Published var clipRevisions: [Int: Int] = [:]
     @Published var cacheHits: UInt64 = 0
     @Published var cacheMisses: UInt64 = 0
     @Published var cachePrefetched: UInt64 = 0
@@ -104,6 +263,7 @@ final class ActiveMountItem: Identifiable, ObservableObject {
     init(handle: OpaquePointer, summary: MountSummaryPayload) {
         self.handle = handle
         self.summary = summary
+        self.clips = summary.clips
     }
 
     // Thumbnails: rendered on demand off the main thread. The lock + closed flag guarantee the C
@@ -195,6 +355,57 @@ final class ActiveMountItem: Identifiable, ObservableObject {
               let img = makeImage(buf, w, h) else { return nil }
         scrubCache[key] = img
         return img
+    }
+
+    /// Reconfigures a single clip live without unmounting, refreshes its summary, and invalidates
+    /// its cached thumbnail & scrub previews.
+    func reconfigureClip(
+        index: Int,
+        stretchBake: Bool,
+        stretchOverride: Int,
+        focusMode: Int,
+        dualIsoMode: Int,
+        badPixelsMode: Int,
+        stripeMode: Int
+    ) {
+        let h = handle
+        Task.detached(priority: .userInitiated) { [weak self] in
+            guard let self else { return }
+            self.thumbLock.lock()
+            let closed = self.thumbClosed
+            self.thumbLock.unlock()
+            if closed { return }
+
+            guard let rawPtr = cinefs_reconfigure_clip(
+                h,
+                index,
+                stretchBake ? 1 : 0,
+                UInt32(stretchOverride),
+                UInt32(focusMode),
+                UInt32(dualIsoMode),
+                UInt32(badPixelsMode),
+                UInt32(stripeMode)
+            ) else { return }
+            let jsonStr = String(cString: rawPtr)
+            cinefs_free_string(rawPtr)
+            guard let data = jsonStr.data(using: .utf8),
+                  let updated = try? JSONDecoder().decode(MountedClipInfo.self, from: data)
+            else { return }
+
+            self.thumbLock.lock()
+            self.thumbCache.removeValue(forKey: index)
+            let lo = index * 1000
+            let hi = lo + 1000
+            self.scrubCache = self.scrubCache.filter { $0.key < lo || $0.key >= hi }
+            self.thumbLock.unlock()
+
+            await MainActor.run {
+                if index < self.clips.count {
+                    self.clips[index] = updated
+                    self.clipRevisions[index, default: 0] += 1
+                }
+            }
+        }
     }
 
     func refreshStats() {
@@ -1310,6 +1521,7 @@ struct ClipThumbView: View {
     let index: Int
     let frameCount: Int
     let title: String
+    let revision: Int
     @State private var image: NSImage?
     @State private var failed = false
     @State private var scrubImage: NSImage?
@@ -1368,12 +1580,16 @@ struct ClipThumbView: View {
                 scrubImage = nil
             }
         }
-        .task(id: index) {
-            if image != nil { return }
+        .task(id: "\(index)-\(revision)") {
             let it = item
             let i = index
             let img = await Task.detached(priority: .utility) { it.thumbnail(index: i) }.value
-            if let img { image = img } else { failed = true }
+            if let img {
+                image = img
+                failed = false
+            } else if image == nil {
+                failed = true
+            }
         }
         .help("Preview — move the mouse across it to scrub, click to play (Rec.709, as-shot white balance; not a graded render)")
     }
@@ -1435,9 +1651,15 @@ struct ClipTableView: View {
 
             Divider().gridCellColumns(10)
 
-            ForEach(Array(item.summary.clips.enumerated()), id: \.element.id) { idx, clip in
+            ForEach(Array(item.clips.enumerated()), id: \.element.id) { idx, clip in
                 GridRow {
-                    ClipThumbView(item: item, index: idx, frameCount: clip.frameCount, title: clip.folderName)
+                    ClipThumbView(
+                        item: item,
+                        index: idx,
+                        frameCount: clip.frameCount,
+                        title: clip.folderName,
+                        revision: item.clipRevisions[idx] ?? 0
+                    )
 
                     // Clicking the name opens the clip folder (same as Windows).
                     Button {
@@ -1518,12 +1740,15 @@ struct ClipTableView: View {
                         }
                         return parts.isEmpty ? "DNG payload mode" : parts.joined(separator: " · ") + ". Pixels are rewritten, so LJ92 passthrough is not used."
                     }()
-                    Pill(
-                        text: pillText,
+                    ClipSettingsPill(
+                        item: item,
+                        clipIndex: idx,
+                        clip: clip,
+                        pillText: pillText,
+                        pillHelp: pillHelp,
                         tone: clip.payloadMode.contains("Passthrough") ? .good : .neutral
                     )
-                    .frame(width: 126, alignment: .leading)
-                    .help(pillHelp)
+                    .frame(width: 136, alignment: .leading)
 
                     Button {
                         manager.sendToResolve(item: item, specificClipFolder: clip.folderName)

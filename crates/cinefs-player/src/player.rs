@@ -28,18 +28,19 @@ impl FrameProvider for ClipProvider {
 
     fn decode(&self, index: usize) -> Result<Vec<u16>, String> {
         let c = &self.clip.clip;
+        let rt = self.clip.runtime();
         let (w, h) = (c.width as usize, c.height as usize);
         let mut px = cinefs_core::focus_probe::decode_frame_u16(c, index).map_err(|e| e.to_string())?;
-        if let Some(fix) = &c.focus_fix {
-            fix.apply_u16_ex(&mut px, w, h, c.dual_iso.is_some());
+        if let Some(fix) = &rt.focus_fix {
+            fix.apply_u16_ex(&mut px, w, h, rt.dual_iso.is_some());
         }
-        if let Some(bp) = &c.bad_pixels {
-            bp.apply_u16_ex(&mut px, w, h, c.dual_iso.is_some());
+        if let Some(bp) = &rt.bad_pixels {
+            bp.apply_u16_ex(&mut px, w, h, rt.dual_iso.is_some());
         }
-        if let Some(diso) = &c.dual_iso {
+        if let Some(diso) = &rt.dual_iso {
             diso.apply_u16(&mut px, w, h);
         }
-        if let Some(st) = &c.stripes {
+        if let Some(st) = &rt.stripes {
             st.apply_u16(&mut px, w, h);
         }
         Ok(px)
@@ -49,6 +50,7 @@ impl FrameProvider for ClipProvider {
 /// GPU frame description for `clip` (levels, CFA, as-shot white balance, camera -> Rec.709).
 pub fn format_for_clip(clip: &MountedClip) -> FrameFormat {
     let c = &clip.clip;
+    let rt = clip.runtime();
     let meta = c.dynamic_metas.first();
     let gains = meta.map(|m| [m.wb_gain_r, m.wb_gain_g, m.wb_gain_b]).unwrap_or([1.0; 3]);
     let g = gains[1].max(0.001);
@@ -56,7 +58,7 @@ pub fn format_for_clip(clip: &MountedClip) -> FrameFormat {
     let cfa = c.cfa_pattern.dng_bytes().map(|v| v as u32);
     let matrix = cinefs_core::thumbnail::camera_to_rec709(&c.color_matrix1, c.forward_matrix1.as_ref(), gains)
         .unwrap_or([1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0]);
-    let (black, white) = if c.dual_iso.is_some() {
+    let (black, white) = if rt.dual_iso.is_some() {
         (0.0f32, 65535.0f32)
     } else {
         (c.levels.black as f32, c.levels.white as f32)
@@ -70,7 +72,7 @@ pub fn format_for_clip(clip: &MountedClip) -> FrameFormat {
         wb,
         matrix,
         exposure: 1.0,
-        stretch_y: c.stretch_y,
+        stretch_y: rt.stretch_y,
     }
 }
 

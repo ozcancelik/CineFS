@@ -10,15 +10,19 @@
 //! Also provides `O(1)` 64-bit inode (`node_id`) addressing for zero-lookup NFSv3 / FSKit / WinFsp
 //! file handles and `O(1)` indexed directory pagination.
 
+use crate::bad_pixels::{BadPixelFix, BadPixelMode};
 use crate::cache::{CacheKey, PayloadCache};
 use crate::dng::DngTemplate;
+use crate::dual_iso::{DualIsoCalibration, DualIsoMode};
+use crate::focus_fix::{FocusFix, FocusFixMode};
 use crate::mlv::MlvClip;
+use crate::stripes::{StripeFix, StripeMode};
 use crate::wav::VirtualWav;
 use crate::{DngPayloadMode, Error, Result};
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, Mutex, RwLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 /// Root directory inode (`/`).
@@ -60,30 +64,167 @@ pub struct VfsNodeAttr {
     pub timestamp_unix_secs: u64,
 }
 
+/// Per-clip RAW processing options (initialized from global defaults at mount time and
+/// overridable live per clip without unmounting).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ClipOptions {
+    pub stretch_bake: bool,
+    /// `0=Auto, 1=Off, 2=Horizontal ×3, 3=Vertical ×1.67, 4=Vertical ×3`
+    pub stretch_override: u8,
+    pub focus_mode: FocusFixMode,
+    pub dual_iso_mode: DualIsoMode,
+    pub bad_pixels_mode: BadPixelMode,
+    pub stripe_mode: StripeMode,
+}
+
+impl ClipOptions {
+    pub fn from_globals() -> Self {
+        Self {
+            stretch_bake: crate::dng::stretch_bake(),
+            stretch_override: crate::mlv::stretch_override_mode(),
+            focus_mode: crate::focus_fix::focus_fix_mode(),
+            dual_iso_mode: crate::dual_iso::dual_iso_mode(),
+            bad_pixels_mode: crate::bad_pixels::bad_pixel_mode(),
+            stripe_mode: crate::stripes::stripe_mode(),
+        }
+    }
+}
+
+/// Mutable runtime processing state of one [`MountedClip`], swapped atomically on live
+/// per-clip reconfiguration without re-opening or re-indexing the source container.
+pub struct ClipRuntime {
+    pub options: ClipOptions,
+    pub stretch_y: f64,
+    pub stretch_source: &'static str,
+    pub focus_fix: Option<Arc<FocusFix>>,
+    pub dual_iso: Option<Arc<DualIsoCalibration>>,
+    pub bad_pixels: Option<Arc<BadPixelFix>>,
+    pub stripes: Option<Arc<StripeFix>>,
+    pub dng_template: DngTemplate,
+    pub info_json: Vec<u8>,
+    /// Incremented on every live reconfigure to bump virtual file mtime for NFSv3 / WinFsp.
+    pub generation: u64,
+}
+
+impl ClipRuntime {
+    fn clone_with_template(&self, dng_template: DngTemplate, info_json: Vec<u8>) -> Self {
+        Self {
+            options: self.options,
+            stretch_y: self.stretch_y,
+            stretch_source: self.stretch_source,
+            focus_fix: self.focus_fix.clone(),
+            dual_iso: self.dual_iso.clone(),
+            bad_pixels: self.bad_pixels.clone(),
+            stripes: self.stripes.clone(),
+            dng_template,
+            info_json,
+            generation: self.generation,
+        }
+    }
+}
+
 /// Virtual clip mounted inside `CineFs`.
 pub struct MountedClip {
     pub clip_id: usize,
     pub folder_name: String,
+    pub requested_mode: DngPayloadMode,
     pub clip: MlvClip,
-    pub dng_template: DngTemplate,
     pub wav: Option<VirtualWav>,
-    pub info_json: Vec<u8>,
     pub base_timestamp_secs: u64,
-    thumbnail: std::sync::OnceLock<Option<Arc<crate::thumbnail::Thumbnail>>>,
+    runtime: RwLock<Arc<ClipRuntime>>,
+    thumbnail: Mutex<Option<(u64, Option<Arc<crate::thumbnail::Thumbnail>>)>>,
 }
 
 impl MountedClip {
+    /// Returns the active runtime processing snapshot for this clip.
+    #[inline]
+    pub fn runtime(&self) -> Arc<ClipRuntime> {
+        Arc::clone(&self.runtime.read().unwrap())
+    }
+
     /// Lazily rendered, cached preview image (`None` if the frame could not be decoded).
+    /// Automatically re-renders if the clip's live processing generation changed.
     pub fn thumbnail(&self, max_width: usize) -> Option<Arc<crate::thumbnail::Thumbnail>> {
-        self.thumbnail
-            .get_or_init(|| match crate::thumbnail::render(&self.clip, max_width) {
-                Ok(t) => Some(Arc::new(t)),
-                Err(e) => {
-                    crate::log::write("WARN", &format!("thumbnail for '{}' failed: {e}", self.folder_name));
-                    None
-                }
-            })
-            .clone()
+        let rt = self.runtime();
+        let gen = rt.generation;
+        if let Some((cached_gen, ref img)) = *self.thumbnail.lock().unwrap() {
+            if cached_gen == gen {
+                return img.clone();
+            }
+        }
+        let rendered = match crate::thumbnail::render_with_runtime(&self.clip, &rt, max_width) {
+            Ok(t) => Some(Arc::new(t)),
+            Err(e) => {
+                crate::log::write("WARN", &format!("thumbnail for '{}' failed: {e}", self.folder_name));
+                None
+            }
+        };
+        *self.thumbnail.lock().unwrap() = Some((gen, rendered.clone()));
+        rendered
+    }
+
+    /// Renders an arbitrary frame preview using the clip's active runtime settings (for hover scrub).
+    pub fn render_frame_preview(&self, frame_index: usize, max_width: usize) -> Result<crate::thumbnail::Thumbnail> {
+        let rt = self.runtime();
+        crate::thumbnail::render_frame_with_runtime(&self.clip, &rt, frame_index, max_width)
+    }
+
+    /// Recomputes this clip's processing pipeline and DNG template for `opts` in place.
+    pub fn apply_options(&self, opts: ClipOptions) -> Arc<ClipRuntime> {
+        let (stretch_y, stretch_source) = if let Some(f) = crate::mlv::stretch_override_factor(opts.stretch_override) {
+            (f, "manual")
+        } else if let Some(sampling) = self.clip.rawc_sampling {
+            (crate::mlv::stretch_from_sampling(sampling), "RAWC")
+        } else {
+            (1.0, "none")
+        };
+        let focus_fix = crate::focus_fix::resolve_clip_with_mode(&self.clip, opts.focus_mode).map(Arc::new);
+        let dual_iso = crate::dual_iso::calibrate_clip_with_mode(&self.clip, opts.dual_iso_mode).map(Arc::new);
+        let bad_pixels = crate::bad_pixels::detect_clip_with_mode(
+            &self.clip,
+            opts.bad_pixels_mode,
+            focus_fix.as_deref(),
+            dual_iso.is_some(),
+        )
+        .map(Arc::new);
+        let stripes = crate::stripes::calibrate_clip_with_mode(
+            &self.clip,
+            opts.stripe_mode,
+            focus_fix.as_deref(),
+            bad_pixels.as_deref(),
+            dual_iso.as_deref(),
+        )
+        .map(Arc::new);
+        let dng_template = DngTemplate::new_with_processing(
+            &self.clip,
+            self.requested_mode,
+            self.folder_name.clone(),
+            opts.stretch_bake,
+            stretch_y,
+            focus_fix.clone(),
+            dual_iso.clone(),
+            bad_pixels.clone(),
+            stripes.clone(),
+        );
+        let info_json = build_info_json(&self.clip, &dng_template);
+        let mut guard = self.runtime.write().unwrap();
+        let next_gen = guard.generation + 1;
+        let next = Arc::new(ClipRuntime {
+            options: opts,
+            stretch_y,
+            stretch_source,
+            focus_fix,
+            dual_iso,
+            bad_pixels,
+            stripes,
+            dng_template,
+            info_json,
+            generation: next_gen,
+        });
+        *guard = Arc::clone(&next);
+        drop(guard);
+        *self.thumbnail.lock().unwrap() = None;
+        next
     }
 
     pub fn open(path: impl AsRef<Path>, clip_id: usize, mode: DngPayloadMode) -> Result<Self> {
@@ -97,6 +238,7 @@ impl MountedClip {
         mode: DngPayloadMode,
     ) -> Result<Self> {
         let clip = MlvClip::open(path)?;
+        let options = ClipOptions::from_globals();
         let folder_name = format!(
             "{}_1_{}_0001_C{:04}",
             clip.base_name,
@@ -107,15 +249,27 @@ impl MountedClip {
         let wav = VirtualWav::new(&clip, &folder_name);
         let info_json = build_info_json(&clip, &dng_template);
         let base_timestamp_secs = clip.rtci.unix_epoch_secs();
+        let runtime = Arc::new(ClipRuntime {
+            options,
+            stretch_y: clip.stretch_y,
+            stretch_source: clip.stretch_source,
+            focus_fix: clip.focus_fix.clone(),
+            dual_iso: clip.dual_iso.clone(),
+            bad_pixels: clip.bad_pixels.clone(),
+            stripes: clip.stripes.clone(),
+            dng_template,
+            info_json,
+            generation: 0,
+        });
         Ok(Self {
             clip_id,
             folder_name,
+            requested_mode: mode,
             clip,
-            dng_template,
             wav,
-            info_json,
             base_timestamp_secs,
-            thumbnail: std::sync::OnceLock::new(),
+            runtime: RwLock::new(runtime),
+            thumbnail: Mutex::new(None),
         })
     }
 
@@ -128,7 +282,9 @@ impl MountedClip {
             .get(frame_index)
             .map(|f| f.timestamp_us)
             .unwrap_or(first_us);
-        self.base_timestamp_secs + (cur_us.saturating_sub(first_us) / 1_000_000)
+        self.base_timestamp_secs
+            + self.runtime().generation
+            + (cur_us.saturating_sub(first_us) / 1_000_000)
     }
 
     #[inline]
@@ -159,19 +315,20 @@ impl MountedClip {
         if frame_index >= self.clip.frames.len() {
             return Err(Error::NotFound(format!("Frame {frame_index} not found")));
         }
-        let total_size = self.dng_template.file_size(&self.clip, frame_index);
+        let rt = self.runtime();
+        let total_size = rt.dng_template.file_size(&self.clip, frame_index);
         if offset >= total_size || dst.is_empty() {
             return Ok(0);
         }
         let max_len = (total_size - offset).min(dst.len() as u64) as usize;
         let dst = &mut dst[..max_len];
 
-        let hdr_len = self.dng_template.header_len() as u64;
+        let hdr_len = rt.dng_template.header_len() as u64;
         let mut written = 0usize;
 
         // 1. Serve header portion if `offset < hdr_len`
         if offset < hdr_len {
-            let hdr = self.dng_template.build_header(&self.clip, frame_index);
+            let hdr = rt.dng_template.build_header(&self.clip, frame_index);
             let hdr_off = offset as usize;
             let take = (hdr.len() - hdr_off).min(dst.len());
             dst[..take].copy_from_slice(&hdr[hdr_off..hdr_off + take]);
@@ -183,12 +340,12 @@ impl MountedClip {
             let payload_off = (offset + written as u64).saturating_sub(hdr_len);
             let rem_dst = &mut dst[written..];
 
-            if self.dng_template.is_direct_payload_sliceable(&self.clip) {
+            if rt.dng_template.is_direct_payload_sliceable(&self.clip) {
                 let n = self
                     .clip
                     .read_raw_frame_slice(frame_index, payload_off, rem_dst)?;
                 written += n;
-            } else if self.dng_template.is_byte_swapped_sliceable(&self.clip) {
+            } else if rt.dng_template.is_byte_swapped_sliceable(&self.clip) {
                 if (payload_off & 1) == 0 && (rem_dst.len() & 1) == 0 {
                     let n = self
                         .clip
@@ -222,7 +379,7 @@ impl MountedClip {
                     frame_index,
                 };
                 let payload = cache.get_or_try_compute(key, || {
-                    self.dng_template.build_payload(&self.clip, frame_index)
+                    rt.dng_template.build_payload(&self.clip, frame_index)
                 })?;
 
                 // Trigger background read-ahead prefetching when reading frame start
@@ -242,7 +399,8 @@ impl MountedClip {
                             frame_index: next_idx,
                         };
                         cache.enqueue_prefetch(move || {
-                            match clip_arc
+                            let pf_rt = clip_arc.runtime();
+                            match pf_rt
                                 .dng_template
                                 .build_payload(&clip_arc.clip, next_idx)
                             {
@@ -399,8 +557,13 @@ impl CineFs {
                 mounted.clip.rtci.date_ymd_string(),
                 clip_number
             );
-            mounted.dng_template =
-                DngTemplate::new(&mounted.clip, mode, mounted.folder_name.clone());
+            let new_tpl = DngTemplate::new(&mounted.clip, mode, mounted.folder_name.clone());
+            let new_info = build_info_json(&mounted.clip, &new_tpl);
+            if let Ok(mut rt_guard) = mounted.runtime.write() {
+                let mut rt = (**rt_guard).clone_with_template(new_tpl, new_info);
+                rt.generation = 0;
+                *rt_guard = Arc::new(rt);
+            }
             mounted.wav = VirtualWav::new(&mounted.clip, &mounted.folder_name);
         }
 
@@ -465,20 +628,31 @@ impl CineFs {
         }
     }
 
+    /// Reconfigures a single clip's RAW processing options live without unmounting the volume
+    /// or disturbing any other mounted clip. Evicts only this clip's frame cache and bumps its
+    /// virtual file timestamps.
+    pub fn reconfigure_clip(&self, clip_index: usize, opts: ClipOptions) -> Option<crate::summary::ClipSummary> {
+        let clip = self.clips.get(clip_index)?;
+        let _rt = clip.apply_options(opts);
+        self.cache.invalidate_clip(clip.clip_id);
+        Some(crate::summary::ClipSummary::from_mounted(clip))
+    }
+
     /// Total virtual size in bytes across all mounted clips and total virtual file count.
     pub fn total_volume_stats(&self) -> (u64, u64) {
         let mut total_bytes = 0u64;
         let mut total_files = 1u64; // .metadata_never_index
         for c in &self.clips {
+            let rt = c.runtime();
             for i in 0..c.clip.frames.len() {
-                total_bytes += c.dng_template.file_size(&c.clip, i);
+                total_bytes += rt.dng_template.file_size(&c.clip, i);
                 total_files += 1;
             }
             if let Some(wav) = &c.wav {
                 total_bytes += wav.file_size();
                 total_files += 1;
             }
-            total_bytes += c.info_json.len() as u64;
+            total_bytes += rt.info_json.len() as u64;
             total_files += 1;
         }
         (total_bytes, total_files)
@@ -557,20 +731,22 @@ impl CineFs {
             .get(clip_id)
             .ok_or_else(|| Error::NotFound(format!("Clip {clip_id} not found")))?;
 
+        let rt = clip.runtime();
+        let ts = clip.base_timestamp_secs + rt.generation;
         match sub_id {
             SUB_DIR => Ok(VfsNodeAttr {
                 node_id,
                 kind: EntryKind::Directory,
                 size: 4096,
                 nlink: 2,
-                timestamp_unix_secs: clip.base_timestamp_secs,
+                timestamp_unix_secs: ts,
             }),
             SUB_INFO_JSON => Ok(VfsNodeAttr {
                 node_id,
                 kind: EntryKind::File,
-                size: clip.info_json.len() as u64,
+                size: rt.info_json.len() as u64,
                 nlink: 1,
-                timestamp_unix_secs: clip.base_timestamp_secs,
+                timestamp_unix_secs: ts,
             }),
             SUB_WAV => {
                 let wav = clip
@@ -593,7 +769,7 @@ impl CineFs {
                 Ok(VfsNodeAttr {
                     node_id,
                     kind: EntryKind::File,
-                    size: clip.dng_template.file_size(&clip.clip, frame_idx),
+                    size: rt.dng_template.file_size(&clip.clip, frame_idx),
                     nlink: 1,
                     timestamp_unix_secs: clip.frame_timestamp_secs(frame_idx),
                 })
@@ -824,12 +1000,13 @@ impl CineFs {
 
         let bytes_read = match sub_id {
             SUB_INFO_JSON => {
-                if offset >= clip.info_json.len() as u64 || dst.is_empty() {
+                let rt = clip.runtime();
+                if offset >= rt.info_json.len() as u64 || dst.is_empty() {
                     0
                 } else {
                     let off = offset as usize;
-                    let take = (clip.info_json.len() - off).min(dst.len());
-                    dst[..take].copy_from_slice(&clip.info_json[off..off + take]);
+                    let take = (rt.info_json.len() - off).min(dst.len());
+                    dst[..take].copy_from_slice(&rt.info_json[off..off + take]);
                     take
                 }
             }
@@ -1187,13 +1364,15 @@ impl CineFs {
             .find(|c| c.folder_name == trimmed)
             .ok_or_else(|| Error::NotFound(format!("Directory not found: {dir_path}")))?;
 
+        let rt = clip.runtime();
+        let ts = clip.base_timestamp_secs + rt.generation;
         let mut entries = Vec::with_capacity(clip.clip.frames.len() + 3);
         for i in 0..clip.clip.frames.len() {
             entries.push(VfsAttr {
                 name: clip.frame_file_name(i),
                 kind: EntryKind::File,
-                size: clip.dng_template.file_size(&clip.clip, i),
-                timestamp_unix_secs: clip.clip.frames[i].timestamp_us / 1_000_000,
+                size: rt.dng_template.file_size(&clip.clip, i),
+                timestamp_unix_secs: clip.frame_timestamp_secs(i),
             });
         }
         if let Some(wav) = &clip.wav {
@@ -1207,8 +1386,8 @@ impl CineFs {
         entries.push(VfsAttr {
             name: String::from("info.json"),
             kind: EntryKind::File,
-            size: clip.info_json.len() as u64,
-            timestamp_unix_secs: clip.base_timestamp_secs,
+            size: rt.info_json.len() as u64,
+            timestamp_unix_secs: ts,
         });
 
         let dir_node_id = Self::encode_node_id(clip.clip_id, SUB_DIR);
@@ -1250,12 +1429,14 @@ impl CineFs {
             .find(|c| c.folder_name == folder)
             .ok_or_else(|| Error::NotFound(format!("Clip folder not found: {folder}")))?;
 
+        let rt = clip.runtime();
+        let ts = clip.base_timestamp_secs + rt.generation;
         let Some(file_name) = parts.next() else {
             return Ok(VfsAttr {
                 name: clip.folder_name.clone(),
                 kind: EntryKind::Directory,
                 size: 0,
-                timestamp_unix_secs: clip.base_timestamp_secs,
+                timestamp_unix_secs: ts,
             });
         };
 
@@ -1263,8 +1444,8 @@ impl CineFs {
             return Ok(VfsAttr {
                 name: String::from("info.json"),
                 kind: EntryKind::File,
-                size: clip.info_json.len() as u64,
-                timestamp_unix_secs: clip.base_timestamp_secs,
+                size: rt.info_json.len() as u64,
+                timestamp_unix_secs: ts,
             });
         }
 
@@ -1284,8 +1465,8 @@ impl CineFs {
                 return Ok(VfsAttr {
                     name: file_name.to_string(),
                     kind: EntryKind::File,
-                    size: clip.dng_template.file_size(&clip.clip, frame_idx),
-                    timestamp_unix_secs: clip.clip.frames[frame_idx].timestamp_us / 1_000_000,
+                    size: rt.dng_template.file_size(&clip.clip, frame_idx),
+                    timestamp_unix_secs: clip.frame_timestamp_secs(frame_idx),
                 });
             }
         }
@@ -1321,12 +1502,13 @@ impl CineFs {
             .ok_or_else(|| Error::NotFound(format!("Clip folder not found: {folder}")))?;
 
         if file_name == "info.json" {
-            if offset >= clip.info_json.len() as u64 || dst.is_empty() {
+            let rt = clip.runtime();
+            if offset >= rt.info_json.len() as u64 || dst.is_empty() {
                 return Ok(0);
             }
             let off = offset as usize;
-            let take = (clip.info_json.len() - off).min(dst.len());
-            dst[..take].copy_from_slice(&clip.info_json[off..off + take]);
+            let take = (rt.info_json.len() - off).min(dst.len());
+            dst[..take].copy_from_slice(&rt.info_json[off..off + take]);
             return Ok(take);
         }
 

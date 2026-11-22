@@ -68,6 +68,12 @@ pub struct ClipSummary {
     pub dead_pixels: usize,
     /// Vertical stripe correction active (max gain deviation %, 0.0 = off / none).
     pub stripe_gain_pct: f32,
+    /// Per-clip active processing options (for live per-clip override popovers).
+    pub stretch_override: u8,
+    pub focus_mode: u8,
+    pub dual_iso_mode: u8,
+    pub bad_pixels_mode: u8,
+    pub stripe_mode: u8,
 }
 
 #[derive(Clone, Debug)]
@@ -83,9 +89,10 @@ pub struct MountSummary {
 
 impl ClipSummary {
     pub fn from_mounted(c: &crate::vfs::MountedClip) -> Self {
-        let desc = c.dng_template.mode.description();
-        // clip.stretch_y is the y/x sampling ratio: >1 stretch vertically, <1 stretch horizontally.
-        let r = c.clip.stretch_y;
+        let rt = c.runtime();
+        let desc = rt.dng_template.mode.description();
+        // rt.stretch_y is the y/x sampling ratio: >1 stretch vertically, <1 stretch horizontally.
+        let r = rt.stretch_y;
         let (factor, axis) = if !r.is_finite() || r <= 0.0 || (r - 1.0).abs() < 0.01 {
             (1.0, "none")
         } else {
@@ -96,8 +103,8 @@ impl ClipSummary {
         Self {
             folder_name: c.folder_name.clone(),
             camera_model: c.clip.camera_name.clone(),
-            width: c.dng_template.out_width,
-            height: c.dng_template.out_height,
+            width: rt.dng_template.out_width,
+            height: rt.dng_template.out_height,
             bits_per_pixel: c.clip.bits_per_pixel,
             fps: c.clip.fps_f64(),
             frame_count: c.clip.frames.len(),
@@ -107,27 +114,32 @@ impl ClipSummary {
             is_passthrough: desc.contains("Passthrough"),
             stretch: factor,
             stretch_axis: axis,
-            stretch_baked: c.dng_template.bake.is_some(),
-            stretch_source: c.clip.stretch_source,
-            black_level: if c.clip.dual_iso.is_some() { 0 } else { c.clip.levels.black },
-            white_level: if c.clip.dual_iso.is_some() {
+            stretch_baked: rt.dng_template.bake.is_some(),
+            stretch_source: rt.stretch_source,
+            black_level: if rt.dual_iso.is_some() { 0 } else { c.clip.levels.black },
+            white_level: if rt.dual_iso.is_some() {
                 65535
             } else {
                 c.clip.levels.white.min(
-                    if c.dng_template.dng_bits_per_sample < 16 {
-                        (1u32 << c.dng_template.dng_bits_per_sample) - 1
+                    if rt.dng_template.dng_bits_per_sample < 16 {
+                        (1u32 << rt.dng_template.dng_bits_per_sample) - 1
                     } else {
                         u32::MAX
                     },
                 )
             },
             level_source: c.clip.levels.source,
-            focus_pixels: c.clip.focus_fix.as_ref().map_or(0, |f| f.pixel_count()),
-            focus_source: c.clip.focus_fix.as_ref().map_or("none", |f| f.source()),
-            dual_iso_ev: c.clip.dual_iso.as_ref().map_or(0.0, |d| d.ev_stops),
-            hot_pixels: c.clip.bad_pixels.as_ref().map_or(0, |b| b.hot_count),
-            dead_pixels: c.clip.bad_pixels.as_ref().map_or(0, |b| b.dead_count),
-            stripe_gain_pct: c.clip.stripes.as_ref().map_or(0.0, |s| s.max_gain_pct.max(0.01)),
+            focus_pixels: rt.focus_fix.as_ref().map_or(0, |f| f.pixel_count()),
+            focus_source: rt.focus_fix.as_ref().map_or("none", |f| f.source()),
+            dual_iso_ev: rt.dual_iso.as_ref().map_or(0.0, |d| d.ev_stops),
+            hot_pixels: rt.bad_pixels.as_ref().map_or(0, |b| b.hot_count),
+            dead_pixels: rt.bad_pixels.as_ref().map_or(0, |b| b.dead_count),
+            stripe_gain_pct: rt.stripes.as_ref().map_or(0.0, |s| s.max_gain_pct.max(0.01)),
+            stretch_override: rt.options.stretch_override,
+            focus_mode: rt.options.focus_mode as u8,
+            dual_iso_mode: rt.options.dual_iso_mode as u8,
+            bad_pixels_mode: rt.options.bad_pixels_mode as u8,
+            stripe_mode: rt.options.stripe_mode as u8,
         }
     }
 
@@ -136,7 +148,9 @@ impl ClipSummary {
             "{{\"folderName\":\"{}\",\"cameraModel\":\"{}\",\"width\":{},\"height\":{},\
              \"bitsPerPixel\":{},\"fps\":{:.3},\"frameCount\":{},\"hasAudio\":{},\"payloadMode\":\"{}\",\
              \"stretch\":{:.4},\"stretchAxis\":\"{}\",\"stretchBaked\":{},\"stretchSource\":\"{}\",\
-             \"blackLevel\":{},\"whiteLevel\":{},\"levelSource\":\"{}\",\"focusPixels\":{},\"focusSource\":\"{}\",\"dualIsoEv\":{:.2},\"hotPixels\":{},\"deadPixels\":{},\"stripeGainPct\":{:.2}}}",
+             \"blackLevel\":{},\"whiteLevel\":{},\"levelSource\":\"{}\",\"focusPixels\":{},\"focusSource\":\"{}\",\
+             \"dualIsoEv\":{:.2},\"hotPixels\":{},\"deadPixels\":{},\"stripeGainPct\":{:.2},\
+             \"stretchOverride\":{},\"focusMode\":{},\"dualIsoMode\":{},\"badPixelsMode\":{},\"stripeMode\":{}}}",
             escape_json_str(&self.folder_name),
             escape_json_str(&self.camera_model),
             self.width,
@@ -159,6 +173,11 @@ impl ClipSummary {
             self.hot_pixels,
             self.dead_pixels,
             self.stripe_gain_pct,
+            self.stretch_override,
+            self.focus_mode,
+            self.dual_iso_mode,
+            self.bad_pixels_mode,
+            self.stripe_mode,
         )
     }
 }
@@ -341,13 +360,14 @@ mod tests {
             let mut vfs = CineFs::new(256 * 1024 * 1024);
             vfs.mount_path(&path, crate::DngPayloadMode::Auto).unwrap();
             let c = &vfs.clips[0];
+            let rt = c.runtime();
             let frames = c.clip.frames.len().min(3);
             for f in 0..frames {
-                let hdr = c.dng_template.build_header(&c.clip, f);
-                let payload = c.dng_template.build_payload(&c.clip, f).unwrap();
+                let hdr = rt.dng_template.build_header(&c.clip, f);
+                let payload = rt.dng_template.build_payload(&c.clip, f).unwrap();
                 assert_eq!(
                     hdr.len() + payload.len(),
-                    c.dng_template.file_size(&c.clip, f) as usize,
+                    rt.dng_template.file_size(&c.clip, f) as usize,
                     "size mismatch (bake={bake}, frame {f})"
                 );
             }
@@ -355,9 +375,9 @@ mod tests {
                 "bake={bake}: {}x{} -> {}x{}, mode={}",
                 c.clip.width,
                 c.clip.height,
-                c.dng_template.out_width,
-                c.dng_template.out_height,
-                c.dng_template.mode.description()
+                rt.dng_template.out_width,
+                rt.dng_template.out_height,
+                rt.dng_template.mode.description()
             );
         }
         crate::dng::set_stretch_bake(true);

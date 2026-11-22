@@ -58,6 +58,19 @@ void cinefs_set_focus_fix(uint32_t mode); /* 0 = off, 1 = auto (map + detect fal
 void cinefs_set_dual_iso(uint32_t mode); /* 0 = off, 1 = auto (per-clip recovery, default) */
 void cinefs_set_bad_pixels(uint32_t mode); /* 0 = off, 1 = auto (static hot/dead pixel repair, default) */
 void cinefs_set_stripes(uint32_t mode); /* 0 = off, 1 = auto (default), 2 = force */
+
+/* Reconfigures a single mounted clip live without unmounting. Returns updated ClipSummary JSON
+   (free with cinefs_free_string), or NULL on failure. */
+char* cinefs_reconfigure_clip(
+    const CineFsMountHandle* handle,
+    size_t clip_index,
+    uint32_t stretch_bake,
+    uint32_t stretch_override,
+    uint32_t focus_mode,
+    uint32_t dual_iso_mode,
+    uint32_t bad_pixels_mode,
+    uint32_t stripe_mode
+);
 void cinefs_set_stretch_bake(uint32_t on); /* 1 = bake into DNG pixels, 0 = DefaultScale tag only */
 
 /* Returns JSON {"status":..., "count":N, "message":...}; free with cinefs_free_string. */

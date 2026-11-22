@@ -212,7 +212,7 @@ fn scrub_worker() {
             continue;
         };
         let rendered = catch_unwind(AssertUnwindSafe(|| {
-            cinefs_core::thumbnail::render_frame(&clip.clip, req.frame, PREVIEW_MAX_W).ok()
+            clip.render_frame_preview(req.frame, PREVIEW_MAX_W).ok()
         }))
         .ok()
         .flatten();
@@ -228,6 +228,22 @@ fn scrub_worker() {
 }
 
 // ---------------------------------------------------------------------------------------------
+
+/// Drops cached thumbnail and scrub previews for a single clip (after live reconfiguration).
+pub fn invalidate_clip(key: ClipKey) {
+    {
+        let mut st = lock(&LIST);
+        st.slots.remove(&key);
+        st.queue.retain(|(k, _)| *k != key);
+    }
+    let (lock_m, _) = &*SCRUB;
+    let mut st = lock(lock_m);
+    if st.clip == Some(key) {
+        st.clip = None;
+        st.cache.clear();
+        st.wanted = None;
+    }
+}
 
 /// Forgets previews of mounts that no longer exist (called on every repaint with the live ids).
 pub fn retain_mounts(live: &[u64]) {

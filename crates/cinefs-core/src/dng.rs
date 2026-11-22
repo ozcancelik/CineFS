@@ -144,16 +144,39 @@ struct IfdEntry {
 impl DngTemplate {
     /// Builds the DNG header template for `clip` using `requested_mode` and `reel_name`.
     pub fn new(clip: &MlvClip, requested_mode: DngPayloadMode, reel_name: String) -> Self {
+        Self::new_with_processing(
+            clip,
+            requested_mode,
+            reel_name,
+            stretch_bake(),
+            clip.stretch_y,
+            clip.focus_fix.clone(),
+            clip.dual_iso.clone(),
+            clip.bad_pixels.clone(),
+            clip.stripes.clone(),
+        )
+    }
+
+    /// Builds a DNG header template with explicit per-clip processing overrides (used for live
+    /// per-clip reconfiguration without touching global defaults).
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_with_processing(
+        clip: &MlvClip,
+        requested_mode: DngPayloadMode,
+        reel_name: String,
+        bake_stretch: bool,
+        stretch_y: f64,
+        fix: Option<std::sync::Arc<crate::focus_fix::FocusFix>>,
+        dual_iso: Option<std::sync::Arc<crate::dual_iso::DualIsoCalibration>>,
+        bad_pixels: Option<std::sync::Arc<crate::bad_pixels::BadPixelFix>>,
+        stripes: Option<std::sync::Arc<crate::stripes::StripeFix>>,
+    ) -> Self {
         let mut mode = ResolvedPayloadMode::resolve(requested_mode, clip);
-        let bake = if stretch_bake() {
-            BakePlan::for_clip(clip.width as usize, clip.height as usize, clip.stretch_y)
+        let bake = if bake_stretch {
+            BakePlan::for_clip(clip.width as usize, clip.height as usize, stretch_y)
         } else {
             None
         };
-        let fix = clip.focus_fix.clone();
-        let dual_iso = clip.dual_iso.clone();
-        let bad_pixels = clip.bad_pixels.clone();
-        let stripes = clip.stripes.clone();
         if dual_iso.is_some() {
             // Dual ISO dynamic range exceeds 14-bit; always output 16-bit linear (0..65535).
             mode = ResolvedPayloadMode::Unpacked16;
@@ -262,7 +285,7 @@ impl DngTemplate {
                 50718,
                 TYPE_RATIONAL,
                 2,
-                encode_rational_slice(&default_scale_pairs(if bake.is_some() { 1.0 } else { clip.stretch_y })),
+                encode_rational_slice(&default_scale_pairs(if bake.is_some() { 1.0 } else { stretch_y })),
             ), // DefaultScale (horizontal, vertical) = factor that restores square pixels
             IfdEntry::new(50719, TYPE_LONG, 2, u32_slice_le(&[0, 0])), // DefaultCropOrigin (H, V)
             IfdEntry::new(

@@ -395,7 +395,7 @@ pub unsafe extern "C" fn cinefs_clip_frame_preview(
     let Some(clip) = h.vfs.clips.get(clip_index) else {
         return ptr::null_mut();
     };
-    match crate::thumbnail::render_frame(&clip.clip, frame_index, max_width as usize) {
+    match clip.render_frame_preview(frame_index, max_width as usize) {
         Ok(t) => {
             *out_w = t.width as u32;
             *out_h = t.height as u32;
@@ -403,4 +403,35 @@ pub unsafe extern "C" fn cinefs_clip_frame_preview(
         }
         Err(_) => ptr::null_mut(),
     }
+}
+
+/// Reconfigures a single mounted clip's RAW processing options live without unmounting.
+/// Returns the updated `ClipSummary` JSON string (free with `cinefs_free_string`), or `NULL`.
+#[no_mangle]
+pub unsafe extern "C" fn cinefs_reconfigure_clip(
+    handle: *const CineFsMountHandle,
+    clip_index: usize,
+    stretch_bake: u32,
+    stretch_override: u32,
+    focus_mode: u32,
+    dual_iso_mode: u32,
+    bad_pixels_mode: u32,
+    stripe_mode: u32,
+) -> *mut c_char {
+    if handle.is_null() {
+        return ptr::null_mut();
+    }
+    let h = &*handle;
+    let opts = crate::vfs::ClipOptions {
+        stretch_bake: stretch_bake != 0,
+        stretch_override: stretch_override.min(4) as u8,
+        focus_mode: crate::focus_fix::FocusFixMode::from_u8(focus_mode as u8),
+        dual_iso_mode: crate::dual_iso::DualIsoMode::from_u8(dual_iso_mode as u8),
+        bad_pixels_mode: crate::bad_pixels::BadPixelMode::from_u8(bad_pixels_mode as u8),
+        stripe_mode: crate::stripes::StripeMode::from_u8(stripe_mode as u8),
+    };
+    let Some(summary) = h.vfs.reconfigure_clip(clip_index, opts) else {
+        return ptr::null_mut();
+    };
+    CString::new(summary.to_json()).map(|s| s.into_raw()).unwrap_or(ptr::null_mut())
 }

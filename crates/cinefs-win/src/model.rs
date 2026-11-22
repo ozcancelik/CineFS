@@ -88,7 +88,7 @@ impl WinMountEntry {
             .map(|c| {
                 let mut s = WinClipSummary::from_mounted(c);
                 // The Windows UI shows the DNG bit depth that is actually written.
-                s.bits_per_pixel = c.dng_template.dng_bits_per_sample as u32;
+                s.bits_per_pixel = c.runtime().dng_template.dng_bits_per_sample as u32;
                 s
             })
             .collect();
@@ -97,7 +97,8 @@ impl WinMountEntry {
         let first_width = first.clip.width;
         let first_height = first.clip.height;
         let first_bpp = first.clip.bits_per_pixel;
-        let first_mode_desc = first.dng_template.mode.description();
+        let first_rt = first.runtime();
+        let first_mode_desc = first_rt.dng_template.mode.description();
         let total_frames: usize = vfs.clips.iter().map(|c| c.clip.frames.len()).sum();
         let source_name = if source_paths.len() > 1 {
             format!("{} files", source_paths.len())

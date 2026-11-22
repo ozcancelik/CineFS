@@ -316,7 +316,22 @@ pub fn detect_from_frames(
 /// Detects static hot and dead pixels for `clip` when [`BadPixelMode::Auto`] is active.
 /// Works across `.MLV`, `.mcraw`, and `.braw` clips.
 pub fn detect_clip(clip: &MlvClip) -> Option<BadPixelFix> {
-    if bad_pixel_mode() == BadPixelMode::Off {
+    detect_clip_with_mode(
+        clip,
+        bad_pixel_mode(),
+        clip.focus_fix.as_deref(),
+        clip.dual_iso.is_some(),
+    )
+}
+
+/// Same as [`detect_clip`] with explicit mode and active focus/dual-ISO context.
+pub fn detect_clip_with_mode(
+    clip: &MlvClip,
+    mode: BadPixelMode,
+    focus_fix: Option<&FocusFix>,
+    dual_iso: bool,
+) -> Option<BadPixelFix> {
+    if mode == BadPixelMode::Off {
         return None;
     }
     let (w, h) = (clip.width as usize, clip.height as usize);
@@ -332,10 +347,6 @@ pub fn detect_clip(clip: &MlvClip) -> Option<BadPixelFix> {
         (0..want).map(|i| i * (n - 1) / (want - 1)).collect()
     };
 
-    // Fast path: decode the two anchor frames first; if neither has any isolated defect candidate,
-    // skip decoding the remaining frames completely.
-    let dual_iso = clip.dual_iso.is_some();
-    let ff = clip.focus_fix.as_deref();
     let mut decoded: Vec<Vec<u16>> = Vec::with_capacity(picks.len());
     for &idx in &picks {
         if let Ok(px) = decode_frame_u16(clip, idx) {
@@ -353,7 +364,7 @@ pub fn detect_clip(clip: &MlvClip) -> Option<BadPixelFix> {
         clip.levels.black,
         clip.levels.white,
         dual_iso,
-        ff,
+        focus_fix,
     );
     if let Some(f) = &fix {
         crate::log::write(

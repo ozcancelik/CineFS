@@ -222,22 +222,23 @@ fn cmd_info(mlv_path: &Path, mode: DngPayloadMode) -> Result<()> {
     } else {
         println!("Audio Track       : None");
     }
+    let rt = mounted.runtime();
     println!("Block Counts      : {:?}", clip.block_counts);
     println!("--- Virtual CinemaDNG Layout ---");
     println!("Virtual Folder    : /{}/", mounted.folder_name);
     println!(
         "DNG Payload Mode  : {}",
-        mounted.dng_template.mode.description()
+        rt.dng_template.mode.description()
     );
     println!(
         "DNG Header Size   : {} bytes (StripOffsets = {})",
-        mounted.dng_template.header_len(),
-        mounted.dng_template.header_len()
+        rt.dng_template.header_len(),
+        rt.dng_template.header_len()
     );
     println!(
         "Frame 0 DNG Size  : {} bytes ({:.2} MB)",
-        mounted.dng_template.file_size(clip, 0),
-        (mounted.dng_template.file_size(clip, 0) as f64) / (1024.0 * 1024.0)
+        rt.dng_template.file_size(clip, 0),
+        (rt.dng_template.file_size(clip, 0) as f64) / (1024.0 * 1024.0)
     );
     Ok(())
 }
@@ -277,9 +278,10 @@ fn cmd_bench(mlv_path: &Path, mode: DngPayloadMode) -> Result<()> {
         mounted.clip.bits_per_pixel,
         frame_count
     );
+    let rt = mounted.runtime();
     println!(
         "Active Mode       : {}",
-        mounted.dng_template.mode.description()
+        rt.dng_template.mode.description()
     );
     println!("Container Index   : {:.2} ms", open_ms);
 
@@ -290,7 +292,7 @@ fn cmd_bench(mlv_path: &Path, mode: DngPayloadMode) -> Result<()> {
     for _ in 0..stat_iters {
         for i in 0..frame_count {
             total_size_acc =
-                total_size_acc.wrapping_add(mounted.dng_template.file_size(&mounted.clip, i));
+                total_size_acc.wrapping_add(rt.dng_template.file_size(&mounted.clip, i));
         }
     }
     let stat_elapsed = t_stat.elapsed().as_secs_f64();
@@ -308,7 +310,7 @@ fn cmd_bench(mlv_path: &Path, mode: DngPayloadMode) -> Result<()> {
     let mut hdr_bytes_acc = 0usize;
     for _ in 0..hdr_iters {
         for i in 0..frame_count {
-            let hdr = mounted.dng_template.build_header(&mounted.clip, i);
+            let hdr = rt.dng_template.build_header(&mounted.clip, i);
             hdr_bytes_acc += hdr.len();
         }
     }
@@ -325,8 +327,8 @@ fn cmd_bench(mlv_path: &Path, mode: DngPayloadMode) -> Result<()> {
     let t_single = Instant::now();
     let mut total_bytes_single = 0u64;
     for i in 0..frame_count {
-        let hdr = mounted.dng_template.build_header(&mounted.clip, i);
-        let payload = mounted.dng_template.build_payload(&mounted.clip, i)?;
+        let hdr = rt.dng_template.build_header(&mounted.clip, i);
+        let payload = rt.dng_template.build_payload(&mounted.clip, i)?;
         total_bytes_single += (hdr.len() + payload.len()) as u64;
     }
     let single_elapsed = t_single.elapsed().as_secs_f64();
@@ -350,14 +352,15 @@ fn cmd_bench(mlv_path: &Path, mode: DngPayloadMode) -> Result<()> {
         let m = Arc::clone(&mounted);
         let counter = Arc::clone(&next_frame);
         handles.push(thread::spawn(move || -> Result<u64> {
+            let rt = m.runtime();
             let mut bytes = 0u64;
             loop {
                 let idx = counter.fetch_add(1, Ordering::Relaxed);
                 if idx >= frame_count {
                     break;
                 }
-                let hdr = m.dng_template.build_header(&m.clip, idx);
-                let payload = m.dng_template.build_payload(&m.clip, idx)?;
+                let hdr = rt.dng_template.build_header(&m.clip, idx);
+                let payload = rt.dng_template.build_payload(&m.clip, idx)?;
                 bytes += (hdr.len() + payload.len()) as u64;
             }
             Ok(bytes)
@@ -402,7 +405,7 @@ fn cmd_export(
         "Exporting {} frames to {} ({})...",
         total_frames,
         clip_dir.display(),
-        mounted.dng_template.mode.description()
+        mounted.runtime().dng_template.mode.description()
     );
 
     let threads = thread::available_parallelism()
@@ -417,6 +420,7 @@ fn cmd_export(
         let counter = Arc::clone(&next_frame);
         let dir = Arc::clone(&clip_dir_arc);
         handles.push(thread::spawn(move || -> Result<u64> {
+            let rt = m.runtime();
             let mut written_bytes = 0u64;
             loop {
                 let idx = counter.fetch_add(1, Ordering::Relaxed);
@@ -424,8 +428,8 @@ fn cmd_export(
                     break;
                 }
                 let file_path = dir.join(m.frame_file_name(idx));
-                let hdr = m.dng_template.build_header(&m.clip, idx);
-                let payload = m.dng_template.build_payload(&m.clip, idx)?;
+                let hdr = rt.dng_template.build_header(&m.clip, idx);
+                let payload = rt.dng_template.build_payload(&m.clip, idx)?;
                 let mut f = File::create(file_path)?;
                 f.write_all(&hdr)?;
                 f.write_all(&payload)?;
@@ -450,7 +454,7 @@ fn cmd_export(
     }
 
     let info_path = clip_dir.join("info.json");
-    fs::write(info_path, &mounted.info_json)?;
+    fs::write(info_path, &mounted.runtime().info_json)?;
 
     let elapsed = t0.elapsed().as_secs_f64();
     println!(
@@ -489,7 +493,7 @@ fn cmd_mount(
             c.clip.height,
             c.clip.bits_per_pixel,
             c.clip.frames.len(),
-            c.dng_template.mode.description()
+            c.runtime().dng_template.mode.description()
         );
     }
     println!(
@@ -552,7 +556,7 @@ fn cmd_mount_bench(mlv_path: &Path, mode: DngPayloadMode) -> Result<()> {
     vfs.mount_mlv(mlv_path, mode)?;
     let clip_folder = vfs.clips[0].folder_name.clone();
     let frame_count = vfs.clips[0].clip.frames.len();
-    let mode_desc = vfs.clips[0].dng_template.mode.description().to_string();
+    let mode_desc = vfs.clips[0].runtime().dng_template.mode.description().to_string();
 
     let tmp_mp = std::env::temp_dir().join(format!("cinefs_bench_{}", std::process::id()));
     let vfs_arc = Arc::new(vfs);

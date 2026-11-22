@@ -114,6 +114,26 @@ impl PayloadCache {
         }
     }
 
+    /// Evicts all cached frames belonging to `clip_id` (used when a single clip is reconfigured live).
+    pub fn invalidate_clip(&self, clip_id: usize) {
+        let mut guard = self.inner.lock().unwrap();
+        let mut freed = 0usize;
+        guard.entries.retain(|e| {
+            if e.key.clip_id == clip_id {
+                freed += e.data.len();
+                false
+            } else {
+                true
+            }
+        });
+        guard.current_bytes = guard.current_bytes.saturating_sub(freed);
+        if let Some((cid, _)) = guard.last_accessed_frame {
+            if cid == clip_id {
+                guard.last_accessed_frame = None;
+            }
+        }
+    }
+
     /// Atomically fetches `key` from cache, waits if another thread is currently decoding `key`,
     /// or marks `key` as `in_flight` and runs `compute` exactly once across all threads.
     pub fn get_or_try_compute<F>(&self, key: CacheKey, compute: F) -> crate::Result<Arc<Vec<u8>>>

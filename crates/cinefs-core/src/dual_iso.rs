@@ -255,7 +255,12 @@ pub fn calibrate_from_frames(
 /// Detects and calibrates Dual ISO for `clip` if Dual ISO mode is enabled.
 /// Returns `None` for normal single-ISO clips, codec-decoded clips, or when Dual ISO is off.
 pub fn calibrate_clip(clip: &MlvClip) -> Option<DualIsoCalibration> {
-    if dual_iso_mode() == DualIsoMode::Off || clip.is_codec_decoded() {
+    calibrate_clip_with_mode(clip, dual_iso_mode())
+}
+
+/// Same as [`calibrate_clip`] with an explicit [`DualIsoMode`] (used for live per-clip overrides).
+pub fn calibrate_clip_with_mode(clip: &MlvClip, mode: DualIsoMode) -> Option<DualIsoCalibration> {
+    if mode == DualIsoMode::Off || clip.is_codec_decoded() {
         return None;
     }
     let (w, h) = (clip.width as usize, clip.height as usize);
