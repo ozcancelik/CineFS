@@ -4,7 +4,7 @@
 ; 2. Silently installs the bundled WinFsp runtime MSI if not already present
 ; 3. Registers Windows Explorer right-click "Mount with CineFS" for .MLV, .mcraw, .braw, and folders
 #define MyAppName "CineFS"
-#define MyAppVersion "0.1.0"
+#define MyAppVersion "0.2.0"
 #define MyAppPublisher "Özcan Çelik"
 #define MyAppURL "https://github.com/ozcancelik/CineFS"
 #define MyAppExeName "CineFS.exe"
