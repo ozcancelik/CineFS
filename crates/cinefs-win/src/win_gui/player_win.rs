@@ -244,6 +244,7 @@ pub(super) unsafe fn open(vfs: Arc<CineFs>, clip_index: usize, title: &str, star
     SetWindowLongPtrW(hwnd, GWLP_USERDATA, st as isize);
     let st = &mut *st;
     apply_volume(st);
+    st.player.engine.play();
     st.pacer = Some(spawn_pacer(hwnd, st.tick_pending.clone(), st.pacer_stop.clone()));
 
     OPEN.with(|o| o.borrow_mut().push((hwnd as usize, vfs)));

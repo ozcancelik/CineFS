@@ -155,12 +155,6 @@ fn bucket_frame(bucket: usize, frame_count: usize) -> usize {
     if n > 1 { bucket * (frame_count - 1) / (n - 1) } else { 0 }
 }
 
-/// Frame the preview shows while the mouse is at `frac` (0..1): clicking the preview starts
-/// playback there.
-pub fn scrub_frame_index(frac: f32, frame_count: usize) -> usize {
-    bucket_frame(scrub_bucket(frac, frame_count), frame_count)
-}
-
 /// Frame to show while the mouse is at `frac` (0..1) across the preview of `clip`: the cached
 /// image if it is ready, otherwise `None` (the request is queued; the window is repainted when
 /// the frame is ready, and the caller keeps showing the list preview meanwhile).

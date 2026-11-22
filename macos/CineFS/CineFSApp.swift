@@ -147,7 +147,7 @@ final class ActiveMountItem: Identifiable, ObservableObject {
     // and only the newest request decodes (older ones that waited on the lock are dropped).
     static let scrubBuckets = 48
 
-    /// Frame shown for scrub position `bucket` (clicking the preview starts playback there).
+    /// Frame shown for scrub position `bucket`.
     static func scrubFrame(bucket: Int, frameCount: Int) -> Int {
         let n = max(1, min(frameCount, scrubBuckets))
         return n > 1 ? bucket * (frameCount - 1) / (n - 1) : 0
@@ -302,6 +302,7 @@ final class PlayerController: ObservableObject {
         if startFrame > 0 { cinefs_player_seek(player, Double(startFrame)) }
         hasAudio = cinefs_player_has_audio(player) != 0
         applyVolume()
+        cinefs_player_play(player)
         let t = Timer(timeInterval: 1.0 / 120.0, repeats: true) { [weak self] _ in
             MainActor.assumeIsolated {
                 guard let self, let p = self.player else { return }
@@ -1237,9 +1238,7 @@ struct ClipThumbView: View {
         .clipShape(RoundedRectangle(cornerRadius: 3))
         .contentShape(Rectangle())
         .onTapGesture {
-            // Play from the frame the preview is scrubbed to (from the start when not scrubbed).
-            let start = lastBucket >= 0 ? ActiveMountItem.scrubFrame(bucket: lastBucket, frameCount: frameCount) : 0
-            PlayerWindows.shared.open(item: item, clipIndex: index, title: title, startFrame: start)
+            PlayerWindows.shared.open(item: item, clipIndex: index, title: title)
         }
         .onContinuousHover { phase in
             switch phase {
@@ -1261,7 +1260,7 @@ struct ClipThumbView: View {
             let img = await Task.detached(priority: .utility) { it.thumbnail(index: i) }.value
             if let img { image = img } else { failed = true }
         }
-        .help("Preview — move the mouse across it to scrub, click to play from there (Rec.709, as-shot white balance; not a graded render)")
+        .help("Preview — move the mouse across it to scrub, click to play (Rec.709, as-shot white balance; not a graded render)")
     }
 
     private func scrub(to f: CGFloat) {

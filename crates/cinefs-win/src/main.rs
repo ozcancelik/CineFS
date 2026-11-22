@@ -1016,7 +1016,7 @@ mod win_gui {
         /// Import only this clip into the Resolve Media Pool (icon at the end of the row).
         ClipResolve(usize, usize),
         /// Clip preview image: hovering scrubs through the clip and shows a play badge; clicking
-        /// plays it from the scrubbed frame.
+        /// plays it from the start.
         ClipThumb(usize, usize),
         /// Footer settings menus (applied to the next mount), like the macOS footer pickers.
         StretchMethodMenu,
@@ -3499,7 +3499,7 @@ mod win_gui {
                         }
 
                         // Clip preview (middle frame): hover scrubs and shows a play badge, click
-                        // plays from the scrubbed frame. Same as macOS.
+                        // plays from the start. Same as macOS.
                         {
                             let tw = scale_dpi(THUMB_W, dpi);
                             let th = scale_dpi(THUMB_H, dpi);
@@ -4051,8 +4051,7 @@ mod win_gui {
                 }
             }
             HitAction::ClipThumb(m_idx, c_idx) => {
-                // Plays from the frame the preview is scrubbed to (the middle frame is what the
-                // preview shows otherwise, but playback then starts at the beginning).
+                // Always start playback from the beginning of the clip.
                 let target = {
                     let Ok(guard) = APP_STATE.lock() else {
                         return;
@@ -4064,16 +4063,11 @@ mod win_gui {
                             .get(c_idx)
                             .cloned()
                             .unwrap_or_else(|| format!("Clip {}", c_idx + 1));
-                        let frames = m.vfs.clips.get(c_idx).map_or(0, |k| k.clip.frames.len());
-                        let start = match st.scrub_hover {
-                            Some((hm, hc, f)) if hm == m_idx && hc == c_idx => thumbs::scrub_frame_index(f, frames),
-                            _ => 0,
-                        };
-                        Some((m.vfs.clone(), title, start))
+                        Some((m.vfs.clone(), title))
                     })
                 };
-                if let Some((vfs, title, start)) = target {
-                    if let Err(e) = player_win::open(vfs, c_idx, &title, start) {
+                if let Some((vfs, title)) = target {
+                    if let Err(e) = player_win::open(vfs, c_idx, &title, 0) {
                         cinefs_core::log_warn!("player: {e}");
                         set_status(hwnd, format!("Could not open the player: {e}"), true);
                     }
