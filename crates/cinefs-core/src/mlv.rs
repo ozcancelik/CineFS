@@ -220,7 +220,8 @@ pub struct MlvClip {
     /// Magic Lantern focus-pixel maps.
     pub raw_buffer_width: u32,
     pub raw_buffer_height: u32,
-    /// Recorded window offset inside the sensor buffer (`panPosX/Y` from the first `VIDF`).
+    /// Recorded window origin inside the sensor buffer (`panPosX/Y` from the first `VIDF`,
+    /// aligned to 8px horizontally and 2px vertically for packed raw / Bayer boundaries).
     pub pan_x: u32,
     pub pan_y: u32,
     pub bits_per_pixel: u32,
@@ -598,8 +599,11 @@ impl MlvClip {
                             let header_and_space = 32 + frame_space;
                             if bsize > header_and_space {
                                 if self.frames.is_empty() {
-                                    self.pan_x = u16::from_le_bytes([vhdr[8], vhdr[9]]) as u32;
-                                    self.pan_y = u16::from_le_bytes([vhdr[10], vhdr[11]]) as u32;
+                                    // Align `panPosX` to 8px (14-bit pack boundary) and `panPosY` to 2px (Bayer).
+                                    let pan_x = u16::from_le_bytes([vhdr[8], vhdr[9]]) as u32;
+                                    let pan_y = u16::from_le_bytes([vhdr[10], vhdr[11]]) as u32;
+                                    self.pan_x = (pan_x + 7) & !7;
+                                    self.pan_y = pan_y & !1;
                                 }
                                 let payload_offset = offset + header_and_space;
                                 let payload_size = (bsize - header_and_space) as u32;

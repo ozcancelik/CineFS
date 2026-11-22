@@ -266,4 +266,62 @@ mod tests {
     fn unknown_camera_returns_none() {
         assert!(lookup(0x8000_0285, 1920, 1080, 1920, 1080, 0, 0).is_none());
     }
+
+    #[test]
+    fn inspect_real_focus_clip_when_set() {
+        let Ok(path) = std::env::var("CINEFS_TEST_FOCUS_MLV") else { return };
+        let clip = MlvClip::open(std::path::Path::new(&path)).expect("open clip");
+        let fix = lookup_for_clip(&clip).expect("bundled map");
+        let (w, h) = (clip.width as usize, clip.height as usize);
+        let cfg = crate::focus_probe::ProbeConfig::for_bits(clip.bits_per_pixel, clip.levels.black as f32);
+        let mut acc = crate::focus_probe::ProbeAccum::new(w, h);
+        let n = clip.frames.len();
+        for i in 0..n.min(8) {
+            let idx = if n <= 1 { 0 } else { i * (n - 1) / (n.min(8) - 1) };
+            if let Ok(px) = crate::focus_probe::decode_frame_u16(&clip, idx) {
+                acc.add_frame(&px, cfg);
+            }
+        }
+        let probed = acc.candidates(0.7);
+        let mut hits = 0usize;
+        for c in &probed {
+            if fix.is_defect(c.x, c.y) { hits += 1; }
+        }
+        eprintln!(
+            "clip={} raw={}x{} frame={}x{} origin=({},{}) map_px={} probed={} hits={} ({:.1}%)",
+            clip.base_name, clip.raw_buffer_width, clip.raw_buffer_height,
+            clip.width, clip.height, clip.pan_x, clip.pan_y,
+            fix.pixel_count(), probed.len(), hits,
+            if probed.is_empty() { 0.0 } else { hits as f64 * 100.0 / probed.len() as f64 }
+        );
+        // Test candidate shifts (dx, dy) around (0, 0) AND wider Y shifts
+        let mut best: Vec<((i32, i32), usize)> = Vec::new();
+        for dy in -4i32..=4 {
+            for dx in -4i32..=4 {
+                let h = probed.iter().filter(|c| {
+                    let (nx, ny) = (c.x as i32 - dx, c.y as i32 - dy);
+                    nx >= 0 && ny >= 0 && fix.is_defect(nx as u32, ny as u32)
+                }).count();
+                if h > 0 { best.push(((dx, dy), h)); }
+            }
+        }
+        best.sort_by(|a, b| b.1.cmp(&a.1));
+        eprintln!("  top local (probed - map) shifts: {:?}", &best[..best.len().min(6)]);
+        if hits * 2 < probed.len() {
+            // Check larger shifts too
+            let mut votes = std::collections::HashMap::<(i32, i32), usize>::new();
+            for c in probed.iter().take(300) {
+                for &(mx, my) in &fix.coords {
+                    let dx = c.x as i32 - mx as i32;
+                    let dy = c.y as i32 - my as i32;
+                    if dx.abs() <= 160 && dy.abs() <= 300 {
+                        *votes.entry((dx, dy)).or_insert(0) += 1;
+                    }
+                }
+            }
+            let mut top: Vec<_> = votes.into_iter().collect();
+            top.sort_by(|a, b| b.1.cmp(&a.1));
+            eprintln!("  top wide (probed - map) shifts: {:?}", &top[..top.len().min(6)]);
+        }
+    }
 }
