@@ -7,6 +7,7 @@
 use cinefs_core::bad_pixels::BadPixelMode;
 use cinefs_core::dual_iso::DualIsoMode;
 use cinefs_core::focus_fix::FocusFixMode;
+use cinefs_core::stripes::StripeMode;
 use cinefs_core::DngPayloadMode;
 use std::fs;
 use std::path::Path;
@@ -20,6 +21,7 @@ pub struct Settings {
     pub focus_fix: FocusFixMode,
     pub dual_iso: DualIsoMode,
     pub bad_pixels: BadPixelMode,
+    pub stripes: StripeMode,
     /// 0 = Auto (from RAWC), 1 = off, 2 = horizontal x3, 3 = vertical x1.67, 4 = vertical x3
     pub stretch_mode: u8,
     /// Player output volume 0..1 and mute, shared by every player window.
@@ -36,6 +38,7 @@ impl Default for Settings {
             focus_fix: FocusFixMode::Auto,
             dual_iso: DualIsoMode::Auto,
             bad_pixels: BadPixelMode::Auto,
+            stripes: StripeMode::Auto,
             stretch_mode: 0,
             player_volume: 1.0,
             player_muted: false,
@@ -109,6 +112,23 @@ fn parse_bad_pixels(s: &str) -> Option<BadPixelMode> {
     }
 }
 
+fn stripes_key(m: StripeMode) -> &'static str {
+    match m {
+        StripeMode::Off => "off",
+        StripeMode::Auto => "auto",
+        StripeMode::Force => "force",
+    }
+}
+
+fn parse_stripes(s: &str) -> Option<StripeMode> {
+    match s {
+        "0" | "false" | "off" => Some(StripeMode::Off),
+        "1" | "true" | "on" | "auto" => Some(StripeMode::Auto),
+        "2" | "force" => Some(StripeMode::Force),
+        _ => None,
+    }
+}
+
 fn parse_bool(s: &str) -> Option<bool> {
     match s {
         "1" | "true" | "on" => Some(true),
@@ -158,6 +178,11 @@ impl Settings {
                         s.bad_pixels = m;
                     }
                 }
+                "stripes" => {
+                    if let Some(m) = parse_stripes(v) {
+                        s.stripes = m;
+                    }
+                }
                 "stretch_mode" => {
                     if let Ok(n) = v.parse::<u8>() {
                         if n <= 4 {
@@ -186,7 +211,7 @@ impl Settings {
     pub fn to_text(&self) -> String {
         format!(
             "# CineFS preferences (defaults for clips mounted from now on)\n\
-             mode={}\nauto_open_explorer={}\nstretch_bake={}\nfocus_fix={}\ndual_iso={}\nbad_pixels={}\nstretch_mode={}\n\
+             mode={}\nauto_open_explorer={}\nstretch_bake={}\nfocus_fix={}\ndual_iso={}\nbad_pixels={}\nstripes={}\nstretch_mode={}\n\
              player_volume={:.3}\nplayer_muted={}\n",
             mode_key(self.mode),
             self.auto_open_explorer as u8,
@@ -194,6 +219,7 @@ impl Settings {
             focus_fix_key(self.focus_fix),
             dual_iso_key(self.dual_iso),
             bad_pixels_key(self.bad_pixels),
+            stripes_key(self.stripes),
             self.stretch_mode,
             self.player_volume,
             self.player_muted as u8,
@@ -229,6 +255,7 @@ mod tests {
             focus_fix: FocusFixMode::Map,
             dual_iso: DualIsoMode::Off,
             bad_pixels: BadPixelMode::Off,
+            stripes: StripeMode::Force,
             stretch_mode: 3,
             player_volume: 0.25,
             player_muted: true,

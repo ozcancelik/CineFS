@@ -231,6 +231,13 @@ pub extern "C" fn cinefs_set_bad_pixels(mode: u32) {
     crate::bad_pixels::set_bad_pixel_mode(crate::bad_pixels::BadPixelMode::from_u8(mode as u8));
 }
 
+/// Sets vertical stripe correction mode for clips opened afterwards:
+/// `0` = Off, `1` = Auto (default), `2` = Force.
+#[no_mangle]
+pub extern "C" fn cinefs_set_stripes(mode: u32) {
+    crate::stripes::set_stripe_mode(crate::stripes::StripeMode::from_u8(mode as u8));
+}
+
 /// Imports clip folders (newline-separated absolute paths) into DaVinci Resolve's Media Pool via
 /// `fuscript`. Blocks up to `timeout_secs`; call from a background thread.
 /// Returns a JSON string `{"status":"imported|imported_nothing|no_project|no_resolve|no_fuscript|failed","count":N,"message":""}`

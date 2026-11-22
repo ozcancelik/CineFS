@@ -39,6 +39,9 @@ impl FrameProvider for ClipProvider {
         if let Some(diso) = &c.dual_iso {
             diso.apply_u16(&mut px, w, h);
         }
+        if let Some(st) = &c.stripes {
+            st.apply_u16(&mut px, w, h);
+        }
         Ok(px)
     }
 }

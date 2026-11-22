@@ -76,6 +76,7 @@ struct MountedClipInfo: Codable, Identifiable {
     let dualIsoEv: Double?
     let hotPixels: Int?
     let deadPixels: Int?
+    let stripeGainPct: Double?
 }
 
 struct MountSummaryPayload: Codable {
@@ -559,6 +560,7 @@ final class MountManager: ObservableObject {
         static let focusFix = "com.ozcancelik.cinefs.focusFix"
         static let dualIso = "com.ozcancelik.cinefs.dualIso"
         static let badPixels = "com.ozcancelik.cinefs.badPixels"
+        static let stripes = "com.ozcancelik.cinefs.stripes"
     }
 
     @Published var selectedMode: UInt32 = 0 { // 0 = Auto, 1 = Passthrough, 2 = NativePacked, 3 = Unpacked16
@@ -629,6 +631,14 @@ final class MountManager: ObservableObject {
         }
     }
 
+    /// Canon 8-column vertical stripe correction for clips mounted from now on (0 = Off, 1 = Auto, 2 = Force).
+    @Published var stripesMode: Int = 1 {
+        didSet {
+            cinefs_set_stripes(UInt32(stripesMode))
+            UserDefaults.standard.set(stripesMode, forKey: Pref.stripes)
+        }
+    }
+
     private var statsTimer: Timer?
 
     private init() {
@@ -653,11 +663,15 @@ final class MountManager: ObservableObject {
         if let v = d.object(forKey: Pref.badPixels) as? Int, (0...1).contains(v) {
             badPixelsMode = v
         }
+        if let v = d.object(forKey: Pref.stripes) as? Int, (0...2).contains(v) {
+            stripesMode = v
+        }
 
         cinefs_set_stretch_bake(stretchBake ? 1 : 0)
         cinefs_set_focus_fix(UInt32(focusFixMode))
         cinefs_set_dual_iso(UInt32(dualIsoMode))
         cinefs_set_bad_pixels(UInt32(badPixelsMode))
+        cinefs_set_stripes(UInt32(stripesMode))
         Self.applyStretchOverride(stretchOverride)
         resolveAppPath = detectResolveAppPath()
         statsTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
@@ -1120,101 +1134,148 @@ struct MainMountWindowView: View {
 
             Divider()
 
-            // Footer Bar
-            HStack(spacing: 12) {
-                Toggle("Open in Finder on mount", isOn: $manager.autoRevealInFinder)
-                    .toggleStyle(.checkbox)
-                    .font(.system(size: 12))
-
-                Picker("Stretch", selection: $manager.stretchBake) {
-                    Text("Baked into DNG").tag(true)
-                    Text("Metadata only").tag(false)
-                }
-                .pickerStyle(.menu)
-                .controlSize(.small)
-                .frame(width: 170)
-                .help("Anamorphic crop_rec clips: bake the stretch into the DNG pixels (works in every app, ~3× data for 3x1) or only write the DefaultScale tag (fast). Applies to the next mount.")
-
-                Picker("Focus pixels", selection: $manager.focusFixMode) {
-                    Text("Auto").tag(1)
-                    Text("Map").tag(2)
-                    Text("Off").tag(0)
-                }
-                .pickerStyle(.menu)
-                .controlSize(.small)
-                .frame(width: 148)
-                .help("Canon 100D / 650D / 700D / EOS M / EOS M2: remove PDAF dots. Auto uses bundled Magic Lantern focus maps first and falls back to learning the pattern from the clip; Map uses bundled maps only. Pixels are rewritten, so LJ92 passthrough is not used for those clips. Applies to the next mount.")
-
-                Picker("Dual ISO", selection: $manager.dualIsoMode) {
-                    Text("Auto").tag(1)
-                    Text("Off").tag(0)
-                }
-                .pickerStyle(.menu)
-                .controlSize(.small)
-                .frame(width: 122)
-                .help("Magic Lantern Dual ISO: automatically detect and recover Dual ISO clips per clip into 16-bit linear DNGs (normal single-ISO clips are untouched). Applies to the next mount.")
-
-                Picker("Hot pixels", selection: $manager.badPixelsMode) {
-                    Text("Auto").tag(1)
-                    Text("Off").tag(0)
-                }
-                .pickerStyle(.menu)
-                .controlSize(.small)
-                .frame(width: 132)
-                .help("Automatically detect and repair static hot and dead sensor pixels per clip. Clean clips with 0 defects keep zero-decode LJ92 passthrough. Applies to the next mount.")
-
-                Picker("Override", selection: $manager.stretchOverride) {
-                    Text("Auto").tag(0)
-                    Text("Off").tag(1)
-                    Text("Horizontal ×3").tag(2)
-                    Text("Vertical ×1.67").tag(3)
-                    Text("Vertical ×3").tag(4)
-                }
-                .pickerStyle(.menu)
-                .controlSize(.small)
-                .frame(width: 170)
-                .help("Force the stretch if the file's RAWC block is missing or wrong. Applies to the next mount.")
-
-                Button {
-                    manager.promptChooseResolveApp()
-                } label: {
-                    HStack(spacing: 4) {
-                        Image(systemName: "gearshape")
-                        Text(manager.resolveAppPath != nil ? "Resolve: Found" : "Locate Resolve.app...")
-                    }
-                    .font(.system(size: 11))
-                }
-                .buttonStyle(.bordered)
-                .controlSize(.small)
-                .help(manager.resolveAppPath ?? "Select DaVinci Resolve.app location")
-
-                Spacer()
-
-                if manager.isMounting {
-                    ProgressView()
+            // Footer Bar (2-row pro layout: labeled RAW controls on top, app status & actions below)
+            VStack(spacing: 8) {
+                HStack(alignment: .bottom, spacing: 12) {
+                    footerControl("STRETCH", width: 132) {
+                        Picker("Stretch", selection: $manager.stretchBake) {
+                            Text("Baked into DNG").tag(true)
+                            Text("Metadata only").tag(false)
+                        }
+                        .labelsHidden()
+                        .pickerStyle(.menu)
                         .controlSize(.small)
-                    Text("Indexing & mounting...")
-                        .font(.system(size: 12))
-                        .foregroundStyle(.secondary)
-                } else {
-                    Text(verbatim: "\(manager.mounts.count) active mount\(manager.mounts.count == 1 ? "" : "s") • ~/CineFS")
-                        .font(.system(size: 11))
-                        .foregroundStyle(.secondary)
+                    }
+                    .help("Anamorphic crop_rec clips: bake the stretch into the DNG pixels (works in every app, ~3× data for 3x1) or only write the DefaultScale tag (fast). Applies to the next mount.")
+
+                    footerControl("OVERRIDE", width: 112) {
+                        Picker("Override", selection: $manager.stretchOverride) {
+                            Text("Auto").tag(0)
+                            Text("Off").tag(1)
+                            Text("Horizontal ×3").tag(2)
+                            Text("Vertical ×1.67").tag(3)
+                            Text("Vertical ×3").tag(4)
+                        }
+                        .labelsHidden()
+                        .pickerStyle(.menu)
+                        .controlSize(.small)
+                    }
+                    .help("Force the stretch if the file's RAWC block is missing or wrong. Applies to the next mount.")
+
+                    footerControl("FOCUS", width: 78) {
+                        Picker("Focus pixels", selection: $manager.focusFixMode) {
+                            Text("Auto").tag(1)
+                            Text("Map").tag(2)
+                            Text("Off").tag(0)
+                        }
+                        .labelsHidden()
+                        .pickerStyle(.menu)
+                        .controlSize(.small)
+                    }
+                    .help("Canon 100D / 650D / 700D / EOS M / EOS M2: remove PDAF dots. Auto uses bundled Magic Lantern focus maps first and falls back to learning the pattern from the clip; Map uses bundled maps only. Applies to the next mount.")
+
+                    footerControl("DUAL ISO", width: 78) {
+                        Picker("Dual ISO", selection: $manager.dualIsoMode) {
+                            Text("Auto").tag(1)
+                            Text("Off").tag(0)
+                        }
+                        .labelsHidden()
+                        .pickerStyle(.menu)
+                        .controlSize(.small)
+                    }
+                    .help("Magic Lantern Dual ISO: automatically detect and recover Dual ISO clips per clip into 16-bit linear DNGs (normal single-ISO clips are untouched). Applies to the next mount.")
+
+                    footerControl("HOT PX", width: 78) {
+                        Picker("Hot pixels", selection: $manager.badPixelsMode) {
+                            Text("Auto").tag(1)
+                            Text("Off").tag(0)
+                        }
+                        .labelsHidden()
+                        .pickerStyle(.menu)
+                        .controlSize(.small)
+                    }
+                    .help("Automatically detect and repair static hot and dead sensor pixels per clip. Clean clips keep zero-decode LJ92 passthrough. Applies to the next mount.")
+
+                    footerControl("STRIPES", width: 82) {
+                        Picker("Vertical stripes", selection: $manager.stripesMode) {
+                            Text("Auto").tag(1)
+                            Text("Force").tag(2)
+                            Text("Off").tag(0)
+                        }
+                        .labelsHidden()
+                        .pickerStyle(.menu)
+                        .controlSize(.small)
+                    }
+                    .help("Canon 8-column ADC vertical stripe correction: Auto removes visible stripes while keeping LJ92 passthrough on clean clips; Force always applies calibrated 16-phase correction. Applies to the next mount.")
+
+                    Spacer()
+
+                    Text("Applies to next mount")
+                        .font(.system(size: 10))
+                        .foregroundStyle(.tertiary)
+                        .padding(.bottom, 3)
                 }
 
-                if !manager.mounts.isEmpty {
-                    Button("Unmount All") {
-                        manager.unmountAllSync()
+                Divider().opacity(0.5)
+
+                HStack(spacing: 12) {
+                    Toggle("Open in Finder on mount", isOn: $manager.autoRevealInFinder)
+                        .toggleStyle(.checkbox)
+                        .font(.system(size: 11.5))
+
+                    Button {
+                        manager.promptChooseResolveApp()
+                    } label: {
+                        HStack(spacing: 4) {
+                            Image(systemName: "gearshape")
+                            Text(manager.resolveAppPath != nil ? "Resolve: Found" : "Locate Resolve.app...")
+                        }
+                        .font(.system(size: 11))
                     }
                     .buttonStyle(.bordered)
                     .controlSize(.small)
+                    .help(manager.resolveAppPath ?? "Select DaVinci Resolve.app location")
+
+                    Spacer()
+
+                    if manager.isMounting {
+                        ProgressView()
+                            .controlSize(.small)
+                        Text("Indexing & mounting...")
+                            .font(.system(size: 11.5))
+                            .foregroundStyle(.secondary)
+                    } else {
+                        Text(verbatim: "\(manager.mounts.count) active mount\(manager.mounts.count == 1 ? "" : "s") • ~/CineFS")
+                            .font(.system(size: 11))
+                            .foregroundStyle(.secondary)
+                    }
+
+                    if !manager.mounts.isEmpty {
+                        Button("Unmount All") {
+                            manager.unmountAllSync()
+                        }
+                        .buttonStyle(.bordered)
+                        .controlSize(.small)
+                    }
                 }
             }
             .padding(.horizontal, 16)
-            .padding(.vertical, 10)
+            .padding(.vertical, 9)
             .background(Color(nsColor: .windowBackgroundColor))
         }
         .frame(minWidth: 700, minHeight: 460)
+    }
+
+    @ViewBuilder
+    private func footerControl<Content: View>(_ label: String, width: CGFloat, @ViewBuilder content: () -> Content) -> some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text(label)
+                .font(.system(size: 9.5, weight: .semibold))
+                .foregroundStyle(.secondary)
+                .padding(.leading, 2)
+            content()
+                .frame(width: width, alignment: .leading)
+        }
     }
 
     private func handleDrop(providers: [NSItemProvider]) -> Bool {
@@ -1425,11 +1486,14 @@ struct ClipTableView: View {
                     let hotCount = clip.hotPixels ?? 0
                     let deadCount = clip.deadPixels ?? 0
                     let badCount = hotCount + deadCount
+                    let stripePct = clip.stripeGainPct ?? 0
+                    let hasStripes = stripePct > 0
                     let pillText: String = {
                         var tags: [String] = []
                         if clip.focusPixels > 0 { tags.append("FP") }
                         if badCount > 0 { tags.append("HP") }
                         if hasDiso { tags.append("DISO") }
+                        if hasStripes { tags.append("VS") }
                         if !tags.isEmpty {
                             let base = (hasDiso || !clip.payloadMode.contains("Native")) ? "16-bit" : "Native"
                             return "\(base) + \(tags.joined(separator: " + "))"
@@ -1448,6 +1512,9 @@ struct ClipTableView: View {
                         }
                         if badCount > 0 {
                             parts.append("Hot/dead pixels repaired: \(hotCount) hot, \(deadCount) dead")
+                        }
+                        if hasStripes {
+                            parts.append(String(format: "Vertical stripes corrected (max %.2f%%)", stripePct))
                         }
                         return parts.isEmpty ? "DNG payload mode" : parts.joined(separator: " · ") + ". Pixels are rewritten, so LJ92 passthrough is not used."
                     }()

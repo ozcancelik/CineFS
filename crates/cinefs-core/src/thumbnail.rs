@@ -214,6 +214,9 @@ pub fn render_frame(clip: &MlvClip, frame_index: usize, max_width: usize) -> Res
     } else {
         (clip.levels.black as f32, clip.levels.white as f32)
     };
+    if let Some(st) = &clip.stripes {
+        st.apply_u16(&mut src, w, h);
+    }
     let meta = clip
         .frames
         .get(idx)

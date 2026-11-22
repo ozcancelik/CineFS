@@ -47,10 +47,9 @@ mounts through the NFS client that is built into macOS.
 
 ## Known limitations
 
-- **Magic Lantern `.MLV`:** there is no vertical stripe correction yet.
-  Dual ISO clips and static hot/dead sensor pixels are automatically detected and repaired per clip
-  (when `Dual ISO` / `Hot pixels` are set to `Auto`; clean clips with no defects keep zero-decode
-  LJ92 passthrough).
+- **Magic Lantern `.MLV`:** Dual ISO clips, static hot/dead sensor pixels, and 8-column Canon
+  vertical stripes are automatically detected and repaired per clip (`Auto` mode); clean clips
+  with no defects keep zero-decode LJ92 passthrough.
 - **Focus pixel correction** is applied to Canon bodies with phase-detect pixels in raw video
   (100D, 650D, 700D, EOS M, EOS M2). In `Auto` mode CineFS uses bundled Magic Lantern focus-pixel
   maps first and falls back to learning the lattice from the clip itself for unmapped readout modes

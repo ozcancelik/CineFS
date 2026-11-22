@@ -153,6 +153,7 @@ mod win_gui {
     const ID_TRAY_ABOUT: usize = 211;
     const ID_TRAY_DUAL_ISO: usize = 212;
     const ID_TRAY_BAD_PIXELS: usize = 213;
+    const ID_TRAY_STRIPES: usize = 214;
 
     /// 0 = Auto (from RAWC), 1 = off, 2 = horizontal x3 (EOS M crop_rec 3x1), 3 = vertical x1.67, 4 = vertical x3
     static STRETCH_MODE: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
@@ -178,6 +179,7 @@ mod win_gui {
         cinefs_core::focus_fix::set_focus_fix_mode(s.focus_fix);
         cinefs_core::dual_iso::set_dual_iso_mode(s.dual_iso);
         cinefs_core::bad_pixels::set_bad_pixel_mode(s.bad_pixels);
+        cinefs_core::stripes::set_stripe_mode(s.stripes);
         STRETCH_MODE.store(s.stretch_mode, std::sync::atomic::Ordering::Relaxed);
         cinefs_core::mlv::set_stretch_override(stretch_override_for(s.stretch_mode));
         s
@@ -200,6 +202,7 @@ mod win_gui {
         s.focus_fix = cinefs_core::focus_fix::focus_fix_mode();
         s.dual_iso = cinefs_core::dual_iso::dual_iso_mode();
         s.bad_pixels = cinefs_core::bad_pixels::bad_pixel_mode();
+        s.stripes = cinefs_core::stripes::stripe_mode();
         s.stretch_mode = STRETCH_MODE.load(std::sync::atomic::Ordering::Relaxed);
         if let Err(e) = s.save(&settings_path()) {
             cinefs_core::log_warn!("Could not save settings: {e}");
@@ -226,6 +229,9 @@ mod win_gui {
     const ID_DUAL_ISO_OFF: usize = 326;
     const ID_BAD_PIXELS_AUTO: usize = 327;
     const ID_BAD_PIXELS_OFF: usize = 328;
+    const ID_STRIPES_AUTO: usize = 340;
+    const ID_STRIPES_FORCE: usize = 341;
+    const ID_STRIPES_OFF: usize = 342;
     /// `ID_OVERRIDE_BASE + stretch mode` (0..=4).
     const ID_OVERRIDE_BASE: usize = 330;
 
@@ -300,6 +306,21 @@ mod win_gui {
         set_status(
             hwnd,
             format!("Hot pixels: {desc} — applies to clips mounted from now on."),
+            false,
+        );
+    }
+
+    unsafe fn apply_stripes(hwnd: *mut c_void, mode: cinefs_core::stripes::StripeMode) {
+        cinefs_core::stripes::set_stripe_mode(mode);
+        persist_settings();
+        let desc = match mode {
+            cinefs_core::stripes::StripeMode::Auto => "Auto (correct visible 8-column vertical stripes)",
+            cinefs_core::stripes::StripeMode::Force => "Force (always calibrate and apply vertical stripe fix)",
+            cinefs_core::stripes::StripeMode::Off => "off",
+        };
+        set_status(
+            hwnd,
+            format!("Vertical stripes: {desc} — applies to clips mounted from now on."),
             false,
         );
     }
@@ -1072,6 +1093,7 @@ mod win_gui {
         FocusPixelsMenu,
         DualIsoMenu,
         BadPixelsMenu,
+        StripesMenu,
         StretchOverrideMenu,
         /// Footer "About" button: author, project link and the WinFsp notice.
         About,
@@ -2309,6 +2331,12 @@ mod win_gui {
             cinefs_core::bad_pixels::BadPixelMode::Off => "Hot pixels: Off  (click to change)",
         });
         AppendMenuW(menu, MF_STRING, ID_TRAY_BAD_PIXELS, s_bp.as_ptr());
+        let s_st = wstr(match cinefs_core::stripes::stripe_mode() {
+            cinefs_core::stripes::StripeMode::Auto => "Vertical stripes: Auto  (click to change)",
+            cinefs_core::stripes::StripeMode::Force => "Vertical stripes: Force  (click to change)",
+            cinefs_core::stripes::StripeMode::Off => "Vertical stripes: Off  (click to change)",
+        });
+        AppendMenuW(menu, MF_STRING, ID_TRAY_STRIPES, s_st.as_ptr());
 
         AppendMenuW(menu, MF_STRING, ID_TRAY_OPEN_LOG, s_log.as_ptr());
         let s_about = wstr("About CineFS...");
@@ -3008,9 +3036,9 @@ mod win_gui {
         // Drop cached clip previews of mounts that are gone.
         let live_ids: Vec<u64> = st.mounts.iter().map(|m| m.id).collect();
         thumbs::retain_mounts(&live_ids);
-        // Two footer rows: next-mount settings on top, the usual controls below.
-        let settings_h = scale_dpi(36, dpi);
-        let footer_h = settings_h + scale_dpi(46, dpi);
+        // Two footer rows: labeled next-mount settings on top, the usual controls below.
+        let settings_h = scale_dpi(48, dpi);
+        let footer_h = settings_h + scale_dpi(44, dpi);
         let pad_x = scale_dpi(18, dpi);
 
         // 1. Header Bar
@@ -3655,6 +3683,7 @@ mod win_gui {
                                 if clip.focus_pixels > 0 { tags.push("FP"); }
                                 if clip.hot_pixels + clip.dead_pixels > 0 { tags.push("HP"); }
                                 if clip.dual_iso_ev > 0.0 { tags.push("DISO"); }
+                                if clip.stripe_gain_pct > 0.0 { tags.push("VS"); }
                                 if !tags.is_empty() {
                                     let base = if clip.dual_iso_ev > 0.0 || !clip.payload_badge.starts_with("Native") {
                                         "16-bit"
@@ -3793,40 +3822,54 @@ mod win_gui {
         canvas.fill_rect(0, fy, w, footer_h, COL_FOOTER_BG);
         canvas.fill_rect(0, fy, w, 1, COL_DIVIDER);
 
-        // Settings row (top of the footer): the same three "applies to the next mount" choices
-        // as the macOS footer pickers. Each button opens a menu with the options.
+        // Settings row (top of the footer): small uppercase label above each compact dropdown,
+        // matching the macOS 2-row pro footer.
         {
-            let sh = scale_dpi(26, dpi);
-            let sy = fy + (settings_h - sh) / 2 + scale_dpi(2, dpi);
-            let gap = scale_dpi(8, dpi);
+            let lbl_h = scale_dpi(13, dpi);
+            let sh = scale_dpi(24, dpi);
+            let lbl_y = fy + scale_dpi(5, dpi);
+            let sy = lbl_y + lbl_h + scale_dpi(2, dpi);
+            let gap = scale_dpi(10, dpi);
             let bake = cinefs_core::dng::stretch_bake();
             let focus = cinefs_core::focus_fix::focus_fix_mode();
             let diso = cinefs_core::dual_iso::dual_iso_mode();
             let bp = cinefs_core::bad_pixels::bad_pixel_mode();
+            let st_mode = cinefs_core::stripes::stripe_mode();
             let mode = STRETCH_MODE.load(std::sync::atomic::Ordering::Relaxed);
-            let buttons = [
-                (format!("Stretch: {}", if bake { "Baked into DNG" } else { "Metadata only" }), 156, HitAction::StretchMethodMenu),
-                (format!("Focus: {}", focus.label()), 100, HitAction::FocusPixelsMenu),
-                (format!("Dual ISO: {}", diso.label()), 110, HitAction::DualIsoMenu),
-                (format!("Hot px: {}", bp.label()), 104, HitAction::BadPixelsMenu),
-                (format!("Override: {}", stretch_mode_short(mode)), 156, HitAction::StretchOverrideMenu),
+            let buttons: [(&str, String, i32, HitAction); 6] = [
+                ("STRETCH", if bake { "Baked into DNG" } else { "Metadata only" }.into(), 126, HitAction::StretchMethodMenu),
+                ("OVERRIDE", stretch_mode_short(mode).into(), 108, HitAction::StretchOverrideMenu),
+                ("FOCUS", focus.label().into(), 72, HitAction::FocusPixelsMenu),
+                ("DUAL ISO", diso.label().into(), 72, HitAction::DualIsoMenu),
+                ("HOT PX", bp.label().into(), 72, HitAction::BadPixelsMenu),
+                ("STRIPES", st_mode.label().into(), 76, HitAction::StripesMenu),
             ];
             let mut x = pad_x;
-            for (label, bw, action) in buttons {
-                let rc = Rect { left: x, top: sy, right: x + scale_dpi(bw, dpi), bottom: sy + sh };
-                render_button(st, canvas, text_cmds, rc, &label, action, BtnStyle::Secondary, dpi);
+            for (heading, value, bw, action) in buttons {
+                let bwp = scale_dpi(bw, dpi);
+                text_cmds.push(TextDrawCmd {
+                    text: String::from(heading),
+                    rect: Rect { left: x + scale_dpi(2, dpi), top: lbl_y, right: x + bwp, bottom: lbl_y + lbl_h },
+                    color: COL_TEXT_MUTED,
+                    font_kind: FontKind::BadgeSmall,
+                    flags: DT_LEFT | DT_VCENTER | DT_SINGLELINE,
+                    clip_y: None,
+                });
+                let rc = Rect { left: x, top: sy, right: x + bwp, bottom: sy + sh };
+                render_button(st, canvas, text_cmds, rc, &value, action, BtnStyle::Secondary, dpi);
                 x = rc.right + gap;
             }
             let about_rc = Rect { left: w - pad_x - scale_dpi(64, dpi), top: sy, right: w - pad_x, bottom: sy + sh };
             render_button(st, canvas, text_cmds, about_rc, "About", HitAction::About, BtnStyle::Secondary, dpi);
             text_cmds.push(TextDrawCmd {
-                text: String::from("Applies to the next mount"),
+                text: String::from("Applies to next mount"),
                 rect: Rect { left: x + scale_dpi(4, dpi), top: sy, right: about_rc.left - gap, bottom: sy + sh },
                 color: COL_TEXT_MUTED,
                 font_kind: FontKind::Subtitle,
                 flags: DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS,
                 clip_y: None,
             });
+            canvas.fill_rect(pad_x, fy + settings_h - 1, w - pad_x * 2, 1, COL_DIVIDER);
         }
         let main_y = fy + settings_h;
         let main_h = footer_h - settings_h;
@@ -4085,7 +4128,7 @@ mod win_gui {
                 }
             }
             HitAction::ClipResolve(m_idx, c_idx) => import_to_resolve(hwnd, Some(m_idx), Some(c_idx)),
-            HitAction::StretchMethodMenu | HitAction::FocusPixelsMenu | HitAction::DualIsoMenu | HitAction::BadPixelsMenu | HitAction::StretchOverrideMenu => {
+            HitAction::StretchMethodMenu | HitAction::FocusPixelsMenu | HitAction::DualIsoMenu | HitAction::BadPixelsMenu | HitAction::StripesMenu | HitAction::StretchOverrideMenu => {
                 let rect = {
                     let Ok(guard) = APP_STATE.lock() else {
                         return;
@@ -4165,6 +4208,30 @@ mod win_gui {
                                     ID_BAD_PIXELS_OFF,
                                     "Off",
                                     cur == cinefs_core::bad_pixels::BadPixelMode::Off,
+                                ),
+                            ],
+                        );
+                    }
+                    HitAction::StripesMenu => {
+                        let cur = cinefs_core::stripes::stripe_mode();
+                        show_choice_popup(
+                            hwnd,
+                            rc,
+                            &[
+                                (
+                                    ID_STRIPES_AUTO,
+                                    "Auto (correct visible 8-column vertical stripes)",
+                                    cur == cinefs_core::stripes::StripeMode::Auto,
+                                ),
+                                (
+                                    ID_STRIPES_FORCE,
+                                    "Force (always calibrate & apply)",
+                                    cur == cinefs_core::stripes::StripeMode::Force,
+                                ),
+                                (
+                                    ID_STRIPES_OFF,
+                                    "Off",
+                                    cur == cinefs_core::stripes::StripeMode::Off,
                                 ),
                             ],
                         );
@@ -4575,6 +4642,14 @@ mod win_gui {
                         };
                         apply_bad_pixels(hwnd, next);
                     }
+                    ID_TRAY_STRIPES => {
+                        let next = match cinefs_core::stripes::stripe_mode() {
+                            cinefs_core::stripes::StripeMode::Auto => cinefs_core::stripes::StripeMode::Force,
+                            cinefs_core::stripes::StripeMode::Force => cinefs_core::stripes::StripeMode::Off,
+                            cinefs_core::stripes::StripeMode::Off => cinefs_core::stripes::StripeMode::Auto,
+                        };
+                        apply_stripes(hwnd, next);
+                    }
                     ID_TRAY_STRETCH => {
                         apply_stretch_mode(hwnd, (STRETCH_MODE.load(std::sync::atomic::Ordering::Relaxed) + 1) % 5)
                     }
@@ -4586,6 +4661,9 @@ mod win_gui {
                     ID_DUAL_ISO_OFF => apply_dual_iso(hwnd, cinefs_core::dual_iso::DualIsoMode::Off),
                     ID_BAD_PIXELS_AUTO => apply_bad_pixels(hwnd, cinefs_core::bad_pixels::BadPixelMode::Auto),
                     ID_BAD_PIXELS_OFF => apply_bad_pixels(hwnd, cinefs_core::bad_pixels::BadPixelMode::Off),
+                    ID_STRIPES_AUTO => apply_stripes(hwnd, cinefs_core::stripes::StripeMode::Auto),
+                    ID_STRIPES_FORCE => apply_stripes(hwnd, cinefs_core::stripes::StripeMode::Force),
+                    ID_STRIPES_OFF => apply_stripes(hwnd, cinefs_core::stripes::StripeMode::Off),
                     _ if (ID_OVERRIDE_BASE..ID_OVERRIDE_BASE + 5).contains(&id) => {
                         apply_stretch_mode(hwnd, (id - ID_OVERRIDE_BASE) as u8)
                     }

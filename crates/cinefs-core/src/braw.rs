@@ -1014,6 +1014,7 @@ pub fn open_braw_clip(primary_path: impl AsRef<Path>) -> Result<MlvClip> {
         diso_iso_value: 0,
         dual_iso: None,
         bad_pixels: None,
+        stripes: None,
         active_area: [0, 0, height as i32, width as i32],
         cfa_pattern: CfaPattern::Rggb,
         camera_name,

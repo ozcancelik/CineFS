@@ -66,6 +66,8 @@ pub struct ClipSummary {
     /// Static hot / dead pixels repaired per frame.
     pub hot_pixels: usize,
     pub dead_pixels: usize,
+    /// Vertical stripe correction active (max gain deviation %, 0.0 = off / none).
+    pub stripe_gain_pct: f32,
 }
 
 #[derive(Clone, Debug)]
@@ -125,6 +127,7 @@ impl ClipSummary {
             dual_iso_ev: c.clip.dual_iso.as_ref().map_or(0.0, |d| d.ev_stops),
             hot_pixels: c.clip.bad_pixels.as_ref().map_or(0, |b| b.hot_count),
             dead_pixels: c.clip.bad_pixels.as_ref().map_or(0, |b| b.dead_count),
+            stripe_gain_pct: c.clip.stripes.as_ref().map_or(0.0, |s| s.max_gain_pct.max(0.01)),
         }
     }
 
@@ -133,7 +136,7 @@ impl ClipSummary {
             "{{\"folderName\":\"{}\",\"cameraModel\":\"{}\",\"width\":{},\"height\":{},\
              \"bitsPerPixel\":{},\"fps\":{:.3},\"frameCount\":{},\"hasAudio\":{},\"payloadMode\":\"{}\",\
              \"stretch\":{:.4},\"stretchAxis\":\"{}\",\"stretchBaked\":{},\"stretchSource\":\"{}\",\
-             \"blackLevel\":{},\"whiteLevel\":{},\"levelSource\":\"{}\",\"focusPixels\":{},\"focusSource\":\"{}\",\"dualIsoEv\":{:.2},\"hotPixels\":{},\"deadPixels\":{}}}",
+             \"blackLevel\":{},\"whiteLevel\":{},\"levelSource\":\"{}\",\"focusPixels\":{},\"focusSource\":\"{}\",\"dualIsoEv\":{:.2},\"hotPixels\":{},\"deadPixels\":{},\"stripeGainPct\":{:.2}}}",
             escape_json_str(&self.folder_name),
             escape_json_str(&self.camera_model),
             self.width,
@@ -155,6 +158,7 @@ impl ClipSummary {
             self.dual_iso_ev,
             self.hot_pixels,
             self.dead_pixels,
+            self.stripe_gain_pct,
         )
     }
 }

@@ -22,6 +22,7 @@ pub mod mlv;
 pub mod nfs;
 pub mod resample;
 pub mod resolve;
+pub mod stripes;
 pub mod summary;
 pub mod thumbnail;
 pub mod unpack;
