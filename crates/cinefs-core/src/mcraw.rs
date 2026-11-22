@@ -431,7 +431,7 @@ pub fn open_mcraw_clip(primary_path: impl AsRef<Path>) -> Result<MlvClip> {
     }
     let _ = ITEM_BUFFER_INDEX_DATA;
 
-    Ok(MlvClip {
+    let mut clip = MlvClip {
         base_name,
         chunk_paths: vec![primary_path],
         chunks: vec![file],
@@ -455,6 +455,7 @@ pub fn open_mcraw_clip(primary_path: impl AsRef<Path>) -> Result<MlvClip> {
         diso_mode: 0,
         diso_iso_value: 0,
         dual_iso: None,
+        bad_pixels: None,
         active_area: [0, 0, height as i32, width as i32],
         cfa_pattern,
         camera_name,
@@ -482,7 +483,9 @@ pub fn open_mcraw_clip(primary_path: impl AsRef<Path>) -> Result<MlvClip> {
         audio_info,
         audio_entries,
         block_counts,
-    })
+    };
+    clip.bad_pixels = crate::bad_pixels::detect_clip(&clip).map(std::sync::Arc::new);
+    Ok(clip)
 }
 
 // =============================================================================

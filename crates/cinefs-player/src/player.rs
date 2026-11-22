@@ -33,6 +33,9 @@ impl FrameProvider for ClipProvider {
         if let Some(fix) = &c.focus_fix {
             fix.apply_u16_ex(&mut px, w, h, c.dual_iso.is_some());
         }
+        if let Some(bp) = &c.bad_pixels {
+            bp.apply_u16_ex(&mut px, w, h, c.dual_iso.is_some());
+        }
         if let Some(diso) = &c.dual_iso {
             diso.apply_u16(&mut px, w, h);
         }

@@ -74,6 +74,8 @@ struct MountedClipInfo: Codable, Identifiable {
     let focusPixels: Int
     let focusSource: String?
     let dualIsoEv: Double?
+    let hotPixels: Int?
+    let deadPixels: Int?
 }
 
 struct MountSummaryPayload: Codable {
@@ -556,6 +558,7 @@ final class MountManager: ObservableObject {
         static let stretchOverride = "com.ozcancelik.cinefs.stretchOverride"
         static let focusFix = "com.ozcancelik.cinefs.focusFix"
         static let dualIso = "com.ozcancelik.cinefs.dualIso"
+        static let badPixels = "com.ozcancelik.cinefs.badPixels"
     }
 
     @Published var selectedMode: UInt32 = 0 { // 0 = Auto, 1 = Passthrough, 2 = NativePacked, 3 = Unpacked16
@@ -618,6 +621,14 @@ final class MountManager: ObservableObject {
         }
     }
 
+    /// Static hot/dead pixel repair for clips mounted from now on (0 = Off, 1 = Auto per-clip).
+    @Published var badPixelsMode: Int = 1 {
+        didSet {
+            cinefs_set_bad_pixels(UInt32(badPixelsMode))
+            UserDefaults.standard.set(badPixelsMode, forKey: Pref.badPixels)
+        }
+    }
+
     private var statsTimer: Timer?
 
     private init() {
@@ -639,10 +650,14 @@ final class MountManager: ObservableObject {
         if let v = d.object(forKey: Pref.dualIso) as? Int, (0...1).contains(v) {
             dualIsoMode = v
         }
+        if let v = d.object(forKey: Pref.badPixels) as? Int, (0...1).contains(v) {
+            badPixelsMode = v
+        }
 
         cinefs_set_stretch_bake(stretchBake ? 1 : 0)
         cinefs_set_focus_fix(UInt32(focusFixMode))
         cinefs_set_dual_iso(UInt32(dualIsoMode))
+        cinefs_set_bad_pixels(UInt32(badPixelsMode))
         Self.applyStretchOverride(stretchOverride)
         resolveAppPath = detectResolveAppPath()
         statsTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
@@ -1139,6 +1154,15 @@ struct MainMountWindowView: View {
                 .frame(width: 122)
                 .help("Magic Lantern Dual ISO: automatically detect and recover Dual ISO clips per clip into 16-bit linear DNGs (normal single-ISO clips are untouched). Applies to the next mount.")
 
+                Picker("Hot pixels", selection: $manager.badPixelsMode) {
+                    Text("Auto").tag(1)
+                    Text("Off").tag(0)
+                }
+                .pickerStyle(.menu)
+                .controlSize(.small)
+                .frame(width: 132)
+                .help("Automatically detect and repair static hot and dead sensor pixels per clip. Clean clips with 0 defects keep zero-decode LJ92 passthrough. Applies to the next mount.")
+
                 Picker("Override", selection: $manager.stretchOverride) {
                     Text("Auto").tag(0)
                     Text("Off").tag(1)
@@ -1398,11 +1422,17 @@ struct ClipTableView: View {
                     .frame(width: 40, alignment: .center)
 
                     let hasDiso = (clip.dualIsoEv ?? 0) > 0
+                    let hotCount = clip.hotPixels ?? 0
+                    let deadCount = clip.deadPixels ?? 0
+                    let badCount = hotCount + deadCount
                     let pillText: String = {
-                        if hasDiso && clip.focusPixels > 0 { return "16-bit + FP + DISO" }
-                        if hasDiso { return "16-bit + DISO" }
-                        if clip.focusPixels > 0 {
-                            return clip.payloadMode.contains("Native") ? "Native + FP" : "16-bit + FP"
+                        var tags: [String] = []
+                        if clip.focusPixels > 0 { tags.append("FP") }
+                        if badCount > 0 { tags.append("HP") }
+                        if hasDiso { tags.append("DISO") }
+                        if !tags.isEmpty {
+                            let base = (hasDiso || !clip.payloadMode.contains("Native")) ? "16-bit" : "Native"
+                            return "\(base) + \(tags.joined(separator: " + "))"
                         }
                         if clip.payloadMode.contains("Passthrough") { return "LJ92 Passthrough" }
                         if clip.payloadMode.contains("Native") { return "Native Packed" }
@@ -1415,6 +1445,9 @@ struct ClipTableView: View {
                         }
                         if clip.focusPixels > 0 {
                             parts.append("Focus pixels corrected: \(clip.focusPixels) px/frame (\(clip.focusSource == "map" ? "from Magic Lantern focus map" : "learned from the clip"))")
+                        }
+                        if badCount > 0 {
+                            parts.append("Hot/dead pixels repaired: \(hotCount) hot, \(deadCount) dead")
                         }
                         return parts.isEmpty ? "DNG payload mode" : parts.joined(separator: " · ") + ". Pixels are rewritten, so LJ92 passthrough is not used."
                     }()

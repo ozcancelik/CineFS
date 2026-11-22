@@ -4,6 +4,7 @@
 //! serialization crate. Unknown keys and malformed lines are ignored; missing keys keep defaults.
 //! UI-free and platform-neutral so it can be unit-tested anywhere.
 
+use cinefs_core::bad_pixels::BadPixelMode;
 use cinefs_core::dual_iso::DualIsoMode;
 use cinefs_core::focus_fix::FocusFixMode;
 use cinefs_core::DngPayloadMode;
@@ -18,6 +19,7 @@ pub struct Settings {
     pub stretch_bake: bool,
     pub focus_fix: FocusFixMode,
     pub dual_iso: DualIsoMode,
+    pub bad_pixels: BadPixelMode,
     /// 0 = Auto (from RAWC), 1 = off, 2 = horizontal x3, 3 = vertical x1.67, 4 = vertical x3
     pub stretch_mode: u8,
     /// Player output volume 0..1 and mute, shared by every player window.
@@ -33,6 +35,7 @@ impl Default for Settings {
             stretch_bake: true,
             focus_fix: FocusFixMode::Auto,
             dual_iso: DualIsoMode::Auto,
+            bad_pixels: BadPixelMode::Auto,
             stretch_mode: 0,
             player_volume: 1.0,
             player_muted: false,
@@ -91,6 +94,21 @@ fn parse_dual_iso(s: &str) -> Option<DualIsoMode> {
     }
 }
 
+fn bad_pixels_key(m: BadPixelMode) -> &'static str {
+    match m {
+        BadPixelMode::Off => "off",
+        BadPixelMode::Auto => "auto",
+    }
+}
+
+fn parse_bad_pixels(s: &str) -> Option<BadPixelMode> {
+    match s {
+        "0" | "false" | "off" => Some(BadPixelMode::Off),
+        "1" | "true" | "on" | "auto" => Some(BadPixelMode::Auto),
+        _ => None,
+    }
+}
+
 fn parse_bool(s: &str) -> Option<bool> {
     match s {
         "1" | "true" | "on" => Some(true),
@@ -135,6 +153,11 @@ impl Settings {
                         s.dual_iso = m;
                     }
                 }
+                "bad_pixels" => {
+                    if let Some(m) = parse_bad_pixels(v) {
+                        s.bad_pixels = m;
+                    }
+                }
                 "stretch_mode" => {
                     if let Ok(n) = v.parse::<u8>() {
                         if n <= 4 {
@@ -163,13 +186,14 @@ impl Settings {
     pub fn to_text(&self) -> String {
         format!(
             "# CineFS preferences (defaults for clips mounted from now on)\n\
-             mode={}\nauto_open_explorer={}\nstretch_bake={}\nfocus_fix={}\ndual_iso={}\nstretch_mode={}\n\
+             mode={}\nauto_open_explorer={}\nstretch_bake={}\nfocus_fix={}\ndual_iso={}\nbad_pixels={}\nstretch_mode={}\n\
              player_volume={:.3}\nplayer_muted={}\n",
             mode_key(self.mode),
             self.auto_open_explorer as u8,
             self.stretch_bake as u8,
             focus_fix_key(self.focus_fix),
             dual_iso_key(self.dual_iso),
+            bad_pixels_key(self.bad_pixels),
             self.stretch_mode,
             self.player_volume,
             self.player_muted as u8,
@@ -204,6 +228,7 @@ mod tests {
             stretch_bake: false,
             focus_fix: FocusFixMode::Map,
             dual_iso: DualIsoMode::Off,
+            bad_pixels: BadPixelMode::Off,
             stretch_mode: 3,
             player_volume: 0.25,
             player_muted: true,

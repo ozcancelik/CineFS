@@ -235,6 +235,8 @@ pub struct MlvClip {
     pub diso_iso_value: u32,
     /// Dual ISO calibration (alternating 2-row gain recovery), if detected and enabled.
     pub dual_iso: Option<std::sync::Arc<crate::dual_iso::DualIsoCalibration>>,
+    /// Static hot/dead pixel repair map, if any defects were detected and enabled.
+    pub bad_pixels: Option<std::sync::Arc<crate::bad_pixels::BadPixelFix>>,
     pub active_area: [i32; 4],
     pub cfa_pattern: CfaPattern,
     pub camera_name: String,
@@ -377,6 +379,7 @@ impl MlvClip {
             diso_mode: 0,
             diso_iso_value: 0,
             dual_iso: None,
+            bad_pixels: None,
             active_area: [0; 4],
             cfa_pattern: CfaPattern::Rggb,
             camera_name: String::from("CineFS"),
@@ -846,6 +849,7 @@ impl MlvClip {
         self.levels = crate::levels::resolve(self);
         self.focus_fix = crate::focus_fix::resolve_clip(self).map(std::sync::Arc::new);
         self.dual_iso = crate::dual_iso::calibrate_clip(self).map(std::sync::Arc::new);
+        self.bad_pixels = crate::bad_pixels::detect_clip(self).map(std::sync::Arc::new);
         crate::log::write(
             "INFO",
             &format!(

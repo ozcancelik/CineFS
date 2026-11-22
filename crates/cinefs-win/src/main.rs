@@ -152,6 +152,7 @@ mod win_gui {
     const ID_TRAY_FOCUS: usize = 210;
     const ID_TRAY_ABOUT: usize = 211;
     const ID_TRAY_DUAL_ISO: usize = 212;
+    const ID_TRAY_BAD_PIXELS: usize = 213;
 
     /// 0 = Auto (from RAWC), 1 = off, 2 = horizontal x3 (EOS M crop_rec 3x1), 3 = vertical x1.67, 4 = vertical x3
     static STRETCH_MODE: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
@@ -176,6 +177,7 @@ mod win_gui {
         cinefs_core::dng::set_stretch_bake(s.stretch_bake);
         cinefs_core::focus_fix::set_focus_fix_mode(s.focus_fix);
         cinefs_core::dual_iso::set_dual_iso_mode(s.dual_iso);
+        cinefs_core::bad_pixels::set_bad_pixel_mode(s.bad_pixels);
         STRETCH_MODE.store(s.stretch_mode, std::sync::atomic::Ordering::Relaxed);
         cinefs_core::mlv::set_stretch_override(stretch_override_for(s.stretch_mode));
         s
@@ -197,6 +199,7 @@ mod win_gui {
         s.stretch_bake = cinefs_core::dng::stretch_bake();
         s.focus_fix = cinefs_core::focus_fix::focus_fix_mode();
         s.dual_iso = cinefs_core::dual_iso::dual_iso_mode();
+        s.bad_pixels = cinefs_core::bad_pixels::bad_pixel_mode();
         s.stretch_mode = STRETCH_MODE.load(std::sync::atomic::Ordering::Relaxed);
         if let Err(e) = s.save(&settings_path()) {
             cinefs_core::log_warn!("Could not save settings: {e}");
@@ -221,6 +224,8 @@ mod win_gui {
     const ID_FOCUS_OFF: usize = 322;
     const ID_DUAL_ISO_AUTO: usize = 325;
     const ID_DUAL_ISO_OFF: usize = 326;
+    const ID_BAD_PIXELS_AUTO: usize = 327;
+    const ID_BAD_PIXELS_OFF: usize = 328;
     /// `ID_OVERRIDE_BASE + stretch mode` (0..=4).
     const ID_OVERRIDE_BASE: usize = 330;
 
@@ -279,6 +284,22 @@ mod win_gui {
         set_status(
             hwnd,
             format!("Dual ISO: {desc} — applies to clips mounted from now on."),
+            false,
+        );
+    }
+
+    unsafe fn apply_bad_pixels(hwnd: *mut c_void, mode: cinefs_core::bad_pixels::BadPixelMode) {
+        cinefs_core::bad_pixels::set_bad_pixel_mode(mode);
+        persist_settings();
+        let desc = match mode {
+            cinefs_core::bad_pixels::BadPixelMode::Auto => {
+                "Auto (static hot/dead pixel repair per clip)"
+            }
+            cinefs_core::bad_pixels::BadPixelMode::Off => "off",
+        };
+        set_status(
+            hwnd,
+            format!("Hot pixels: {desc} — applies to clips mounted from now on."),
             false,
         );
     }
@@ -1050,6 +1071,7 @@ mod win_gui {
         StretchMethodMenu,
         FocusPixelsMenu,
         DualIsoMenu,
+        BadPixelsMenu,
         StretchOverrideMenu,
         /// Footer "About" button: author, project link and the WinFsp notice.
         About,
@@ -2282,6 +2304,11 @@ mod win_gui {
             cinefs_core::dual_iso::DualIsoMode::Off => "Dual ISO: Off  (click to change)",
         });
         AppendMenuW(menu, MF_STRING, ID_TRAY_DUAL_ISO, s_diso.as_ptr());
+        let s_bp = wstr(match cinefs_core::bad_pixels::bad_pixel_mode() {
+            cinefs_core::bad_pixels::BadPixelMode::Auto => "Hot pixels: Auto (hot/dead pixel repair)  (click to change)",
+            cinefs_core::bad_pixels::BadPixelMode::Off => "Hot pixels: Off  (click to change)",
+        });
+        AppendMenuW(menu, MF_STRING, ID_TRAY_BAD_PIXELS, s_bp.as_ptr());
 
         AppendMenuW(menu, MF_STRING, ID_TRAY_OPEN_LOG, s_log.as_ptr());
         let s_about = wstr("About CineFS...");
@@ -3623,14 +3650,21 @@ mod win_gui {
                             Some((p_bd, 1.0)),
                         );
                         text_cmds.push(TextDrawCmd {
-                            text: if clip.dual_iso_ev > 0.0 && clip.focus_pixels > 0 {
-                                "16-bit + FP + DISO".to_string()
-                            } else if clip.dual_iso_ev > 0.0 {
-                                "16-bit + DISO".to_string()
-                            } else if clip.focus_pixels > 0 {
-                                if clip.payload_badge.starts_with("Native") { "Native + FP" } else { "16-bit + FP" }.to_string()
-                            } else {
-                                clip.payload_badge.to_string()
+                            text: {
+                                let mut tags: Vec<&str> = Vec::new();
+                                if clip.focus_pixels > 0 { tags.push("FP"); }
+                                if clip.hot_pixels + clip.dead_pixels > 0 { tags.push("HP"); }
+                                if clip.dual_iso_ev > 0.0 { tags.push("DISO"); }
+                                if !tags.is_empty() {
+                                    let base = if clip.dual_iso_ev > 0.0 || !clip.payload_badge.starts_with("Native") {
+                                        "16-bit"
+                                    } else {
+                                        "Native"
+                                    };
+                                    format!("{base} + {}", tags.join(" + "))
+                                } else {
+                                    clip.payload_badge.to_string()
+                                }
                             },
                             rect: Rect { left: cols[0].0, top: p_y, right: cols[0].1, bottom: p_y + p_h },
                             color: p_fg,
@@ -3768,12 +3802,14 @@ mod win_gui {
             let bake = cinefs_core::dng::stretch_bake();
             let focus = cinefs_core::focus_fix::focus_fix_mode();
             let diso = cinefs_core::dual_iso::dual_iso_mode();
+            let bp = cinefs_core::bad_pixels::bad_pixel_mode();
             let mode = STRETCH_MODE.load(std::sync::atomic::Ordering::Relaxed);
             let buttons = [
-                (format!("Stretch: {}", if bake { "Baked into DNG" } else { "Metadata only" }), 164, HitAction::StretchMethodMenu),
-                (format!("Focus pixels: {}", focus.label()), 132, HitAction::FocusPixelsMenu),
-                (format!("Dual ISO: {}", diso.label()), 116, HitAction::DualIsoMenu),
-                (format!("Override: {}", stretch_mode_short(mode)), 164, HitAction::StretchOverrideMenu),
+                (format!("Stretch: {}", if bake { "Baked into DNG" } else { "Metadata only" }), 156, HitAction::StretchMethodMenu),
+                (format!("Focus: {}", focus.label()), 100, HitAction::FocusPixelsMenu),
+                (format!("Dual ISO: {}", diso.label()), 110, HitAction::DualIsoMenu),
+                (format!("Hot px: {}", bp.label()), 104, HitAction::BadPixelsMenu),
+                (format!("Override: {}", stretch_mode_short(mode)), 156, HitAction::StretchOverrideMenu),
             ];
             let mut x = pad_x;
             for (label, bw, action) in buttons {
@@ -4049,7 +4085,7 @@ mod win_gui {
                 }
             }
             HitAction::ClipResolve(m_idx, c_idx) => import_to_resolve(hwnd, Some(m_idx), Some(c_idx)),
-            HitAction::StretchMethodMenu | HitAction::FocusPixelsMenu | HitAction::DualIsoMenu | HitAction::StretchOverrideMenu => {
+            HitAction::StretchMethodMenu | HitAction::FocusPixelsMenu | HitAction::DualIsoMenu | HitAction::BadPixelsMenu | HitAction::StretchOverrideMenu => {
                 let rect = {
                     let Ok(guard) = APP_STATE.lock() else {
                         return;
@@ -4110,6 +4146,25 @@ mod win_gui {
                                     ID_DUAL_ISO_OFF,
                                     "Off",
                                     cur == cinefs_core::dual_iso::DualIsoMode::Off,
+                                ),
+                            ],
+                        );
+                    }
+                    HitAction::BadPixelsMenu => {
+                        let cur = cinefs_core::bad_pixels::bad_pixel_mode();
+                        show_choice_popup(
+                            hwnd,
+                            rc,
+                            &[
+                                (
+                                    ID_BAD_PIXELS_AUTO,
+                                    "Auto (repair static hot & dead pixels)",
+                                    cur == cinefs_core::bad_pixels::BadPixelMode::Auto,
+                                ),
+                                (
+                                    ID_BAD_PIXELS_OFF,
+                                    "Off",
+                                    cur == cinefs_core::bad_pixels::BadPixelMode::Off,
                                 ),
                             ],
                         );
@@ -4513,6 +4568,13 @@ mod win_gui {
                         };
                         apply_dual_iso(hwnd, next);
                     }
+                    ID_TRAY_BAD_PIXELS => {
+                        let next = match cinefs_core::bad_pixels::bad_pixel_mode() {
+                            cinefs_core::bad_pixels::BadPixelMode::Auto => cinefs_core::bad_pixels::BadPixelMode::Off,
+                            cinefs_core::bad_pixels::BadPixelMode::Off => cinefs_core::bad_pixels::BadPixelMode::Auto,
+                        };
+                        apply_bad_pixels(hwnd, next);
+                    }
                     ID_TRAY_STRETCH => {
                         apply_stretch_mode(hwnd, (STRETCH_MODE.load(std::sync::atomic::Ordering::Relaxed) + 1) % 5)
                     }
@@ -4522,6 +4584,8 @@ mod win_gui {
                     ID_FOCUS_OFF => apply_focus_fix(hwnd, cinefs_core::focus_fix::FocusFixMode::Off),
                     ID_DUAL_ISO_AUTO => apply_dual_iso(hwnd, cinefs_core::dual_iso::DualIsoMode::Auto),
                     ID_DUAL_ISO_OFF => apply_dual_iso(hwnd, cinefs_core::dual_iso::DualIsoMode::Off),
+                    ID_BAD_PIXELS_AUTO => apply_bad_pixels(hwnd, cinefs_core::bad_pixels::BadPixelMode::Auto),
+                    ID_BAD_PIXELS_OFF => apply_bad_pixels(hwnd, cinefs_core::bad_pixels::BadPixelMode::Off),
                     _ if (ID_OVERRIDE_BASE..ID_OVERRIDE_BASE + 5).contains(&id) => {
                         apply_stretch_mode(hwnd, (id - ID_OVERRIDE_BASE) as u8)
                     }

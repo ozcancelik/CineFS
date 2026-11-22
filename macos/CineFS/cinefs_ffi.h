@@ -56,6 +56,7 @@ char* cinefs_log_path(void);
 void cinefs_set_stretch_override(float factor);
 void cinefs_set_focus_fix(uint32_t mode); /* 0 = off, 1 = auto (map + detect fallback, default), 2 = map only */
 void cinefs_set_dual_iso(uint32_t mode); /* 0 = off, 1 = auto (per-clip recovery, default) */
+void cinefs_set_bad_pixels(uint32_t mode); /* 0 = off, 1 = auto (static hot/dead pixel repair, default) */
 void cinefs_set_stretch_bake(uint32_t on); /* 1 = bake into DNG pixels, 0 = DefaultScale tag only */
 
 /* Returns JSON {"status":..., "count":N, "message":...}; free with cinefs_free_string. */

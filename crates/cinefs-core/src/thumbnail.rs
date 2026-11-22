@@ -205,6 +205,9 @@ pub fn render_frame(clip: &MlvClip, frame_index: usize, max_width: usize) -> Res
     if let Some(fix) = &clip.focus_fix {
         fix.apply_u16_ex(&mut src, w, h, clip.dual_iso.is_some());
     }
+    if let Some(bp) = &clip.bad_pixels {
+        bp.apply_u16_ex(&mut src, w, h, clip.dual_iso.is_some());
+    }
     let (black, white) = if let Some(diso) = &clip.dual_iso {
         diso.apply_u16(&mut src, w, h);
         (0.0f32, 65535.0f32)

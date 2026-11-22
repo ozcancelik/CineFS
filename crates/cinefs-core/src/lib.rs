@@ -4,6 +4,7 @@
 //! pixel payloads use zero-decode LJ92 passthrough or native bit-depth packing
 //! whenever possible.
 
+pub mod bad_pixels;
 pub mod braw;
 pub mod cache;
 pub mod color_matrices;
