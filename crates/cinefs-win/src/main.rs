@@ -114,6 +114,8 @@ mod win_gui {
     const TPM_BOTTOMALIGN: u32 = 0x0020;
     const TPM_TOPALIGN: u32 = 0x0000;
     const TPM_LEFTALIGN: u32 = 0x0000;
+    const TPM_RETURNCMD: u32 = 0x0100;
+    const MF_POPUP: u32 = 0x0010;
     const MF_STRING: u32 = 0x0000_0000;
     const MF_CHECKED: u32 = 0x0000_0008;
     const MF_SEPARATOR: u32 = 0x0000_0800;
@@ -354,6 +356,176 @@ mod win_gui {
         ClientToScreen(hwnd, &mut pt);
         TrackPopupMenu(menu, TPM_LEFTALIGN | TPM_BOTTOMALIGN, pt.x, pt.y, 0, hwnd, ptr::null());
         DestroyMenu(menu);
+    }
+
+    /// Opens a native Win32 submenu popup for live per-clip RAW overrides on `(m_idx, c_idx)`.
+    unsafe fn show_clip_settings_popup(hwnd: *mut c_void, m_idx: usize, c_idx: usize, badge_rect: Rect) {
+        let (vfs, mount_id, opts, folder_name) = {
+            let Ok(guard) = APP_STATE.lock() else {
+                return;
+            };
+            let Some(st) = guard.as_ref() else {
+                return;
+            };
+            let Some(m) = st.mounts.get(m_idx) else {
+                return;
+            };
+            let Some(clip_arc) = m.vfs.clips.get(c_idx) else {
+                return;
+            };
+            let opts = clip_arc.runtime().options;
+            (m.vfs.clone(), m.id, opts, clip_arc.folder_name.clone())
+        };
+
+        let menu = CreatePopupMenu();
+        if menu.is_null() {
+            return;
+        }
+        let add_sub = |parent: *mut c_void, title: &str, items: &[(usize, &str, bool)]| {
+            let sub = CreatePopupMenu();
+            if sub.is_null() {
+                return;
+            }
+            for &(id, label, checked) in items {
+                let lw = wstr(label);
+                AppendMenuW(
+                    sub,
+                    if checked { MF_STRING | MF_CHECKED } else { MF_STRING },
+                    id,
+                    lw.as_ptr(),
+                );
+            }
+            let tw = wstr(title);
+            AppendMenuW(parent, MF_POPUP, sub as usize, tw.as_ptr());
+        };
+
+        use cinefs_core::bad_pixels::BadPixelMode;
+        use cinefs_core::dual_iso::DualIsoMode;
+        use cinefs_core::focus_fix::FocusFixMode;
+        use cinefs_core::stripes::StripeMode;
+
+        add_sub(
+            menu,
+            &format!("Focus pixels: {}", opts.focus_mode.label()),
+            &[
+                (101, "Auto (focus map, detect fallback)", opts.focus_mode == FocusFixMode::Auto),
+                (102, "Map only (Magic Lantern maps)", opts.focus_mode == FocusFixMode::Map),
+                (100, "Off", opts.focus_mode == FocusFixMode::Off),
+            ],
+        );
+        add_sub(
+            menu,
+            &format!("Dual ISO: {}", opts.dual_iso_mode.label()),
+            &[
+                (201, "Auto (per-clip 16-bit recovery)", opts.dual_iso_mode == DualIsoMode::Auto),
+                (200, "Off", opts.dual_iso_mode == DualIsoMode::Off),
+            ],
+        );
+        add_sub(
+            menu,
+            &format!("Hot pixels: {}", opts.bad_pixels_mode.label()),
+            &[
+                (301, "Auto (hot & dead pixel repair)", opts.bad_pixels_mode == BadPixelMode::Auto),
+                (300, "Off", opts.bad_pixels_mode == BadPixelMode::Off),
+            ],
+        );
+        add_sub(
+            menu,
+            &format!("Vertical stripes: {}", opts.stripe_mode.label()),
+            &[
+                (401, "Auto (visible 8-col stripes)", opts.stripe_mode == StripeMode::Auto),
+                (402, "Force (always apply)", opts.stripe_mode == StripeMode::Force),
+                (400, "Off", opts.stripe_mode == StripeMode::Off),
+            ],
+        );
+        add_sub(
+            menu,
+            &format!("Stretch: {}", if opts.stretch_bake { "Baked into DNG" } else { "Metadata only" }),
+            &[
+                (501, "Baked into DNG pixels", opts.stretch_bake),
+                (500, "Metadata only (DefaultScale)", !opts.stretch_bake),
+            ],
+        );
+        add_sub(
+            menu,
+            &format!("Override: {}", stretch_mode_short(opts.stretch_override)),
+            &[
+                (600, "Auto (from RAWC)", opts.stretch_override == 0),
+                (601, "Off (1:1)", opts.stretch_override == 1),
+                (602, "Horizontal ×3", opts.stretch_override == 2),
+                (603, "Vertical ×1.67", opts.stretch_override == 3),
+                (604, "Vertical ×3", opts.stretch_override == 4),
+            ],
+        );
+
+        let mut pt = Point { x: badge_rect.left, y: badge_rect.bottom + 2 };
+        ClientToScreen(hwnd, &mut pt);
+        let cmd = TrackPopupMenu(
+            menu,
+            TPM_LEFTALIGN | TPM_TOPALIGN | TPM_RETURNCMD,
+            pt.x,
+            pt.y,
+            0,
+            hwnd,
+            ptr::null(),
+        ) as usize;
+        DestroyMenu(menu);
+        if cmd == 0 {
+            return;
+        }
+
+        let mut next = opts;
+        match cmd {
+            100 => next.focus_mode = FocusFixMode::Off,
+            101 => next.focus_mode = FocusFixMode::Auto,
+            102 => next.focus_mode = FocusFixMode::Map,
+            200 => next.dual_iso_mode = DualIsoMode::Off,
+            201 => next.dual_iso_mode = DualIsoMode::Auto,
+            300 => next.bad_pixels_mode = BadPixelMode::Off,
+            301 => next.bad_pixels_mode = BadPixelMode::Auto,
+            400 => next.stripe_mode = StripeMode::Off,
+            401 => next.stripe_mode = StripeMode::Auto,
+            402 => next.stripe_mode = StripeMode::Force,
+            500 => next.stretch_bake = false,
+            501 => next.stretch_bake = true,
+            600..=604 => next.stretch_override = (cmd - 600) as u8,
+            _ => return,
+        }
+        if next == opts {
+            return;
+        }
+
+        let hwnd_val = hwnd as usize;
+        std::thread::spawn(move || {
+            let Some(updated) = vfs.reconfigure_clip(c_idx, next) else {
+                return;
+            };
+            thumbs::invalidate_clip((mount_id, c_idx));
+            let mut was_imported = false;
+            if let Ok(mut guard) = APP_STATE.lock() {
+                if let Some(st) = guard.as_mut() {
+                    if let Some(m) = st.mounts.iter_mut().find(|m| m.id == mount_id) {
+                        if let Some(slot) = m.clips.get_mut(c_idx) {
+                            let mut s = updated;
+                            if let Some(c_arc) = m.vfs.clips.get(c_idx) {
+                                s.bits_per_pixel = c_arc.runtime().dng_template.dng_bits_per_sample as u32;
+                            }
+                            *slot = s;
+                        }
+                    }
+                    if st.resolve_imported.contains(&(mount_id, c_idx)) {
+                        st.resolve_stale.insert((mount_id, c_idx));
+                        was_imported = true;
+                    }
+                }
+            }
+            let msg = if was_imported {
+                format!("Updated '{folder_name}' live — re-import in Resolve to apply there.")
+            } else {
+                format!("Updated '{folder_name}' live.")
+            };
+            set_status(hwnd_val as *mut c_void, msg, false);
+        });
     }
 
     const ID_MODE_AUTO: usize = 300;
@@ -1085,6 +1257,8 @@ mod win_gui {
         ClipExplorer(usize, usize),
         /// Import only this clip into the Resolve Media Pool (icon at the end of the row).
         ClipResolve(usize, usize),
+        /// Clickable mode badge: opens live per-clip RAW override popup menu.
+        ClipSettings(usize, usize),
         /// Clip preview image: hovering scrubs through the clip and shows a play badge; clicking
         /// plays it from the start.
         ClipThumb(usize, usize),
@@ -1141,6 +1315,8 @@ mod win_gui {
         scrub_hover: Option<(usize, usize, f32)>,
         /// Clips sent to DaVinci Resolve in this session: `(mount_id, clip_index)`.
         resolve_imported: std::collections::HashSet<(u64, usize)>,
+        /// Imported clips whose RAW settings were changed live afterwards (need re-import).
+        resolve_stale: std::collections::HashSet<(u64, usize)>,
     }
 
     unsafe impl Send for AppState {}
@@ -2136,6 +2312,7 @@ mod win_gui {
                     if let Some(st) = guard.as_mut() {
                         for k in &target_keys {
                             st.resolve_imported.insert(*k);
+                            st.resolve_stale.remove(k);
                         }
                     }
                 }
@@ -3687,22 +3864,30 @@ mod win_gui {
                             clip_y: None,
                         };
 
-                        // MODE (green only for zero-decode passthrough)
+                        // MODE (clickable: opens live per-clip RAW override menu; green for passthrough)
+                        let mode_action = HitAction::ClipSettings(m_idx, c_idx);
+                        let mode_hover = st.hovered_action.as_ref() == Some(&mode_action);
                         let (p_bg, p_bd, p_fg) = if clip.is_passthrough {
-                            (COL_EMERALD_BG, COL_EMERALD_BORDER, COL_EMERALD_TEXT)
+                            (COL_EMERALD_BG, if mode_hover { COL_ACCENT } else { COL_EMERALD_BORDER }, COL_EMERALD_TEXT)
                         } else {
-                            (COL_BADGE_BG, COL_BADGE_BORDER, COL_BADGE_TEXT)
+                            (
+                                if mode_hover { COL_BTN_SEC_HOVER } else { COL_BADGE_BG },
+                                if mode_hover { COL_ACCENT } else { COL_BADGE_BORDER },
+                                COL_BADGE_TEXT,
+                            )
                         };
+                        let mode_rc = Rect { left: cols[0].0, top: p_y, right: cols[0].1, bottom: p_y + p_h };
                         canvas.draw_rounded_rect(
-                            cols[0].0,
-                            p_y,
-                            cols[0].1 - cols[0].0,
+                            mode_rc.left,
+                            mode_rc.top,
+                            mode_rc.right - mode_rc.left,
                             p_h,
                             scale_dpi(4, dpi) as f32,
                             p_bg,
                             255,
                             Some((p_bd, 1.0)),
                         );
+                        st.hit_boxes.push(HitBox { rect: mode_rc, action: mode_action });
                         text_cmds.push(TextDrawCmd {
                             text: {
                                 let mut tags: Vec<&str> = Vec::new();
@@ -3800,6 +3985,7 @@ mod win_gui {
                             let action = HitAction::ClipResolve(m_idx, c_idx);
                             let hover = st.hovered_action.as_ref() == Some(&action);
                             let imported = st.resolve_imported.contains(&(st.mounts[m_idx].id, c_idx));
+                            let stale = st.resolve_stale.contains(&(st.mounts[m_idx].id, c_idx));
                             let right = rx + rw - scale_dpi(12, dpi);
                             let aw = scale_dpi(ROW_ACTION_W, dpi);
                             let ah = scale_dpi(26, dpi);
@@ -3807,8 +3993,10 @@ mod win_gui {
                             if hover {
                                 canvas.draw_rounded_rect(ax, ay, aw, ah, scale_dpi(5, dpi) as f32, COL_BTN_SEC_HOVER, 255, None);
                             }
-                            let col = if imported {
-                                COL_SUCCESS
+                            let col = if stale {
+                                COL_AMBER_TEXT
+                            } else if imported {
+                                COL_EMERALD_TEXT
                             } else if hover {
                                 COL_ACCENT
                             } else {
@@ -4167,6 +4355,22 @@ mod win_gui {
                 }
             }
             HitAction::ClipResolve(m_idx, c_idx) => import_to_resolve(hwnd, Some(m_idx), Some(c_idx)),
+            HitAction::ClipSettings(m_idx, c_idx) => {
+                let rect = {
+                    let Ok(guard) = APP_STATE.lock() else {
+                        return;
+                    };
+                    guard.as_ref().and_then(|st| {
+                        st.hit_boxes
+                            .iter()
+                            .find(|hb| hb.action == HitAction::ClipSettings(m_idx, c_idx))
+                            .map(|hb| hb.rect)
+                    })
+                };
+                if let Some(rc) = rect {
+                    show_clip_settings_popup(hwnd, m_idx, c_idx, rc);
+                }
+            }
             HitAction::StretchMethodMenu | HitAction::FocusPixelsMenu | HitAction::DualIsoMenu | HitAction::BadPixelsMenu | HitAction::StripesMenu | HitAction::StretchOverrideMenu => {
                 let rect = {
                     let Ok(guard) = APP_STATE.lock() else {
@@ -4387,6 +4591,7 @@ mod win_gui {
                     setup_context_menu: true,
                     scrub_hover: None,
                     resolve_imported: std::collections::HashSet::new(),
+                    resolve_stale: std::collections::HashSet::new(),
                 });
                 0
             }
