@@ -675,9 +675,14 @@ struct PlayerScreen: View {
 @MainActor
 final class PlayerWindows: NSObject, NSWindowDelegate {
     static let shared = PlayerWindows()
-    private var entries: [(window: NSWindow, controller: PlayerController, mountID: UUID)] = []
+    private var entries: [(window: NSWindow, controller: PlayerController, mountID: UUID, clipIndex: Int)] = []
 
     func open(item: ActiveMountItem, clipIndex: Int, title: String, startFrame: Int = 0) {
+        if let existing = entries.first(where: { $0.mountID == item.id && $0.clipIndex == clipIndex }) {
+            if existing.window.isMiniaturized { existing.window.deminiaturize(nil) }
+            existing.window.makeKeyAndOrderFront(nil)
+            return
+        }
         let controller = PlayerController(item: item, clipIndex: clipIndex, title: title, startFrame: startFrame)
         let win = NSWindow(
             contentRect: NSRect(x: 0, y: 0, width: 1280, height: 760),
@@ -688,7 +693,7 @@ final class PlayerWindows: NSObject, NSWindowDelegate {
         win.contentView = NSHostingView(rootView: PlayerScreen(c: controller))
         win.delegate = self
         win.center()
-        entries.append((win, controller, item.id))
+        entries.append((win, controller, item.id, clipIndex))
         win.makeKeyAndOrderFront(nil)
     }
 

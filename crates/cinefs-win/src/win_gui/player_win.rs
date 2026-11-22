@@ -90,8 +90,8 @@ struct PlayerWin {
 }
 
 thread_local! {
-    /// Open player windows (UI thread only): top-level HWND + the volume they play from.
-    static OPEN: RefCell<Vec<(usize, Arc<CineFs>)>> = const { RefCell::new(Vec::new()) };
+    /// Open player windows (UI thread only): top-level HWND + volume + clip index.
+    static OPEN: RefCell<Vec<(usize, Arc<CineFs>, usize)>> = const { RefCell::new(Vec::new()) };
 }
 
 unsafe fn win_state<'a>(hwnd: *mut c_void) -> Option<&'a mut PlayerWin> {
@@ -145,6 +145,21 @@ unsafe fn register_classes() {
 /// Opens a player for clip `clip_index` of `vfs`, starting at `start_frame` (the frame the clip
 /// preview was scrubbed to). Errors are returned for the status banner.
 pub(super) unsafe fn open(vfs: Arc<CineFs>, clip_index: usize, title: &str, start_frame: usize) -> Result<(), String> {
+    if let Some(existing) = OPEN.with(|o| {
+        o.borrow()
+            .iter()
+            .find(|(_, v, c)| Arc::ptr_eq(v, &vfs) && *c == clip_index)
+            .map(|(h, _, _)| *h)
+    }) {
+        const SW_RESTORE: i32 = 9;
+        let hwnd = existing as *mut c_void;
+        if IsIconic(hwnd) != 0 {
+            ShowWindow(hwnd, SW_RESTORE);
+        }
+        SetForegroundWindow(hwnd);
+        SetFocus(hwnd);
+        return Ok(());
+    }
     let clip: Arc<MountedClip> = vfs.clips.get(clip_index).cloned().ok_or("clip index out of range")?;
     register_classes();
     let h_inst = GetModuleHandleW(ptr::null());
@@ -247,7 +262,7 @@ pub(super) unsafe fn open(vfs: Arc<CineFs>, clip_index: usize, title: &str, star
     st.player.engine.play();
     st.pacer = Some(spawn_pacer(hwnd, st.tick_pending.clone(), st.pacer_stop.clone()));
 
-    OPEN.with(|o| o.borrow_mut().push((hwnd as usize, vfs)));
+    OPEN.with(|o| o.borrow_mut().push((hwnd as usize, vfs, clip_index)));
     ShowWindow(hwnd, SW_SHOW);
     SetForegroundWindow(hwnd);
     SetFocus(hwnd);
@@ -258,7 +273,7 @@ pub(super) unsafe fn open(vfs: Arc<CineFs>, clip_index: usize, title: &str, star
 /// Closes the players that read from `vfs` (before it is unmounted).
 pub(super) unsafe fn close_for(vfs: &Arc<CineFs>) {
     let hwnds: Vec<usize> = OPEN.with(|o| {
-        o.borrow().iter().filter(|(_, v)| Arc::ptr_eq(v, vfs)).map(|(h, _)| *h).collect()
+        o.borrow().iter().filter(|(_, v, _)| Arc::ptr_eq(v, vfs)).map(|(h, _, _)| *h).collect()
     });
     for h in hwnds {
         DestroyWindow(h as *mut c_void);
@@ -266,7 +281,7 @@ pub(super) unsafe fn close_for(vfs: &Arc<CineFs>) {
 }
 
 pub(super) unsafe fn close_all() {
-    let hwnds: Vec<usize> = OPEN.with(|o| o.borrow().iter().map(|(h, _)| *h).collect());
+    let hwnds: Vec<usize> = OPEN.with(|o| o.borrow().iter().map(|(h, _, _)| *h).collect());
     for h in hwnds {
         DestroyWindow(h as *mut c_void);
     }
@@ -619,7 +634,7 @@ unsafe fn destroy_state(hwnd: *mut c_void) {
     if let Some(h) = st.pacer.take() {
         let _ = h.join();
     }
-    OPEN.with(|o| o.borrow_mut().retain(|(h, _)| *h != hwnd as usize));
+    OPEN.with(|o| o.borrow_mut().retain(|(h, _, _)| *h != hwnd as usize));
     drop(st); // stops audio + decoder threads, releases the GPU surface (video child still alive)
 }
 
