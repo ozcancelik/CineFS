@@ -4064,12 +4064,12 @@ mod win_gui {
             let st_mode = cinefs_core::stripes::stripe_mode();
             let mode = STRETCH_MODE.load(std::sync::atomic::Ordering::Relaxed);
             let buttons: [(&str, String, i32, HitAction); 6] = [
-                ("STRETCH", if bake { "Baked into DNG" } else { "Metadata only" }.into(), 126, HitAction::StretchMethodMenu),
-                ("OVERRIDE", stretch_mode_short(mode).into(), 108, HitAction::StretchOverrideMenu),
-                ("FOCUS", focus.label().into(), 72, HitAction::FocusPixelsMenu),
-                ("DUAL ISO", diso.label().into(), 72, HitAction::DualIsoMenu),
-                ("HOT PX", bp.label().into(), 72, HitAction::BadPixelsMenu),
-                ("STRIPES", st_mode.label().into(), 76, HitAction::StripesMenu),
+                ("STRETCH", if bake { "Baked into DNG" } else { "Metadata only" }.into(), 132, HitAction::StretchMethodMenu),
+                ("OVERRIDE", stretch_mode_short(mode).into(), 114, HitAction::StretchOverrideMenu),
+                ("FOCUS", focus.label().into(), 74, HitAction::FocusPixelsMenu),
+                ("DUAL ISO", diso.label().into(), 74, HitAction::DualIsoMenu),
+                ("HOT PX", bp.label().into(), 74, HitAction::BadPixelsMenu),
+                ("STRIPES", st_mode.label().into(), 78, HitAction::StripesMenu),
             ];
             let mut x = pad_x;
             for (heading, value, bw, action) in buttons {
@@ -4083,7 +4083,25 @@ mod win_gui {
                     clip_y: None,
                 });
                 let rc = Rect { left: x, top: sy, right: x + bwp, bottom: sy + sh };
-                render_button(st, canvas, text_cmds, rc, &value, action, BtnStyle::Secondary, dpi);
+                render_button(st, canvas, text_cmds, rc, "", action, BtnStyle::Secondary, dpi);
+                let pad_l = scale_dpi(8, dpi);
+                let arrow_w = scale_dpi(16, dpi);
+                text_cmds.push(TextDrawCmd {
+                    text: value,
+                    rect: Rect { left: rc.left + pad_l, top: rc.top, right: rc.right - arrow_w, bottom: rc.bottom },
+                    color: COL_TEXT_PRIMARY,
+                    font_kind: FontKind::BodySemibold,
+                    flags: DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS,
+                    clip_y: None,
+                });
+                text_cmds.push(TextDrawCmd {
+                    text: String::from("▾"),
+                    rect: Rect { left: rc.right - arrow_w, top: rc.top, right: rc.right - scale_dpi(4, dpi), bottom: rc.bottom },
+                    color: COL_TEXT_MUTED,
+                    font_kind: FontKind::BodySemibold,
+                    flags: DT_CENTER | DT_VCENTER | DT_SINGLELINE,
+                    clip_y: None,
+                });
                 x = rc.right + gap;
             }
             let about_rc = Rect { left: w - pad_x - scale_dpi(64, dpi), top: sy, right: w - pad_x, bottom: sy + sh };
