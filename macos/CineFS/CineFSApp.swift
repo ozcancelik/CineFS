@@ -255,6 +255,8 @@ final class ActiveMountItem: Identifiable, ObservableObject {
 
     @Published var clips: [MountedClipInfo]
     @Published var clipRevisions: [Int: Int] = [:]
+    /// Maps clip `folderName` -> `clipRevision` at the moment it was imported into DaVinci Resolve.
+    @Published var resolveImportedRev: [String: Int] = [:]
     @Published var cacheHits: UInt64 = 0
     @Published var cacheMisses: UInt64 = 0
     @Published var cachePrefetched: UInt64 = 0
@@ -405,6 +407,18 @@ final class ActiveMountItem: Identifiable, ObservableObject {
                     self.clipRevisions[index, default: 0] += 1
                 }
             }
+        }
+    }
+
+    func markResolveImported(folder: String) {
+        if let idx = clips.firstIndex(where: { $0.folderName == folder }) {
+            resolveImportedRev[folder] = clipRevisions[idx] ?? 0
+        }
+    }
+
+    func markAllResolveImported() {
+        for (idx, clip) in clips.enumerated() {
+            resolveImportedRev[clip.folderName] = clipRevisions[idx] ?? 0
         }
     }
 
@@ -1116,7 +1130,7 @@ final class MountManager: ObservableObject {
 
         let fuscriptURL = resolveURL.appendingPathComponent("Contents/Libraries/Fusion/fuscript")
         // Pixel aspect ratio (pixel width / height) for clips that need an anamorphic stretch
-        let parSpec = item.summary.clips
+        let parSpec = item.clips
             .filter { abs($0.stretch - 1.0) > 0.01 && !$0.stretchBaked }
             .map { "\($0.folderName)\t\($0.stretchAxis == "horizontal" ? $0.stretch : 1.0 / $0.stretch)" }
             .joined(separator: "\n")
@@ -1150,6 +1164,11 @@ final class MountManager: ObservableObject {
                 self.isImportingToResolve = false
                 switch outcome.status {
                 case "imported":
+                    if let folder = specificClipFolder {
+                        item.markResolveImported(folder: folder)
+                    } else {
+                        item.markAllResolveImported()
+                    }
                     if let total = outcome.parTotal, total > 0 {
                         let applied = outcome.parApplied ?? 0
                         if applied == total {
@@ -1750,13 +1769,31 @@ struct ClipTableView: View {
                     )
                     .frame(width: 136, alignment: .leading)
 
+                    let curRev = item.clipRevisions[idx] ?? 0
+                    let importedRev = item.resolveImportedRev[clip.folderName]
+                    let isImported = importedRev != nil
+                    let needsReimport = importedRev.map { $0 != curRev } ?? false
                     Button {
                         manager.sendToResolve(item: item, specificClipFolder: clip.folderName)
                     } label: {
-                        Image(systemName: "plus.rectangle.on.folder")
+                        if needsReimport {
+                            Image(systemName: "arrow.clockwise.circle.fill")
+                                .foregroundStyle(Color(red: 0.91, green: 0.66, blue: 0.20))
+                        } else if isImported {
+                            Image(systemName: "checkmark.circle.fill")
+                                .foregroundStyle(Color(red: 0.30, green: 0.72, blue: 0.52))
+                        } else {
+                            Image(systemName: "plus.rectangle.on.folder")
+                        }
                     }
                     .buttonStyle(.borderless)
-                    .help("Import only this clip into DaVinci Resolve Media Pool")
+                    .help(
+                        needsReimport
+                            ? "RAW settings changed after sending to DaVinci Resolve — click to re-import"
+                            : isImported
+                                ? "Sent to DaVinci Resolve in this session (click to send again)"
+                                : "Import only this clip into DaVinci Resolve Media Pool"
+                    )
                     .disabled(manager.isImportingToResolve)
                     .frame(width: 24)
                 }

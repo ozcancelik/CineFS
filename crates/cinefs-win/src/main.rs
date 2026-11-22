@@ -1139,6 +1139,8 @@ mod win_gui {
         setup_context_menu: bool,
         /// Clip preview under the mouse: (mount index, clip index, position 0..1 across it).
         scrub_hover: Option<(usize, usize, f32)>,
+        /// Clips sent to DaVinci Resolve in this session: `(mount_id, clip_index)`.
+        resolve_imported: std::collections::HashSet<(u64, usize)>,
     }
 
     unsafe impl Send for AppState {}
@@ -2047,7 +2049,7 @@ mod win_gui {
         mount_idx: Option<usize>,
         specific_clip_idx: Option<usize>,
     ) {
-        let (clip_paths, fallback_explorer_path, fuscript_opt, pars) = {
+        let (clip_paths, target_keys, fallback_explorer_path, fuscript_opt, pars) = {
             let Ok(guard) = APP_STATE.lock() else {
                 return;
             };
@@ -2058,6 +2060,7 @@ mod win_gui {
                 return;
             }
             let mut paths = Vec::new();
+            let mut keys: Vec<(u64, usize)> = Vec::new();
             let mut fallback = st.mounts[0].explorer_root_path();
             match mount_idx {
                 Some(m_idx) if m_idx < st.mounts.len() => {
@@ -2067,14 +2070,21 @@ mod win_gui {
                     if let Some(c_idx) = specific_clip_idx {
                         if let Some(cp) = all_clips.get(c_idx) {
                             paths.push(cp.clone());
+                            keys.push((m.id, c_idx));
                         }
                     } else {
-                        paths.extend(all_clips);
+                        for (c_idx, cp) in all_clips.into_iter().enumerate() {
+                            paths.push(cp);
+                            keys.push((m.id, c_idx));
+                        }
                     }
                 }
                 _ => {
                     for m in &st.mounts {
-                        paths.extend(m.full_clip_paths());
+                        for (c_idx, cp) in m.full_clip_paths().into_iter().enumerate() {
+                            paths.push(cp);
+                            keys.push((m.id, c_idx));
+                        }
                     }
                 }
             }
@@ -2091,6 +2101,7 @@ mod win_gui {
                 .collect();
             (
                 paths,
+                keys,
                 fallback,
                 st.resolve_fuscript_path
                     .clone()
@@ -2120,21 +2131,36 @@ mod win_gui {
             let hwnd = hwnd_val as *mut c_void;
             let outcome = run_resolve_import(fuscript_opt, &clip_paths, &pars);
             let explorer_hint = "The virtual drive was opened in Explorer — drag the clip folder into Resolve's Media Pool.";
+            let mark_imported = || {
+                if let Ok(mut guard) = APP_STATE.lock() {
+                    if let Some(st) = guard.as_mut() {
+                        for k in &target_keys {
+                            st.resolve_imported.insert(*k);
+                        }
+                    }
+                }
+            };
             match outcome {
-                ResolveOutcome::Imported(n) => set_status(
-                    hwnd,
-                    format!("Imported {n} item(s) into the DaVinci Resolve Media Pool."),
-                    false,
-                ),
-                ResolveOutcome::ImportedPar { count, par_applied, par_total } => set_status(
-                    hwnd,
-                    if par_applied == par_total {
-                        format!("Imported {count} item(s) into Resolve; pixel aspect ratio set on {par_applied} stretched clip(s).")
-                    } else {
-                        format!("Imported {count} item(s) into Resolve, but Resolve refused the pixel aspect change on {} of {par_total} stretched clip(s) — see the log (tray > Open Log).", par_total - par_applied)
-                    },
-                    par_applied != par_total,
-                ),
+                ResolveOutcome::Imported(n) => {
+                    mark_imported();
+                    set_status(
+                        hwnd,
+                        format!("Imported {n} item(s) into the DaVinci Resolve Media Pool."),
+                        false,
+                    );
+                }
+                ResolveOutcome::ImportedPar { count, par_applied, par_total } => {
+                    mark_imported();
+                    set_status(
+                        hwnd,
+                        if par_applied == par_total {
+                            format!("Imported {count} item(s) into Resolve; pixel aspect ratio set on {par_applied} stretched clip(s).")
+                        } else {
+                            format!("Imported {count} item(s) into Resolve, but Resolve refused the pixel aspect change on {} of {par_total} stretched clip(s) — see the log (tray > Open Log).", par_total - par_applied)
+                        },
+                        par_applied != par_total,
+                    );
+                }
                 ResolveOutcome::ImportedNothing => {
                     unsafe { open_path_in_explorer(&fallback_explorer_path, "resolve-fallback") };
                     set_status(
@@ -3773,6 +3799,7 @@ mod win_gui {
                         {
                             let action = HitAction::ClipResolve(m_idx, c_idx);
                             let hover = st.hovered_action.as_ref() == Some(&action);
+                            let imported = st.resolve_imported.contains(&(st.mounts[m_idx].id, c_idx));
                             let right = rx + rw - scale_dpi(12, dpi);
                             let aw = scale_dpi(ROW_ACTION_W, dpi);
                             let ah = scale_dpi(26, dpi);
@@ -3780,15 +3807,27 @@ mod win_gui {
                             if hover {
                                 canvas.draw_rounded_rect(ax, ay, aw, ah, scale_dpi(5, dpi) as f32, COL_BTN_SEC_HOVER, 255, None);
                             }
-                            let col = if hover { COL_ACCENT } else { COL_TEXT_SECONDARY };
-                            // Media-pool card with a "+" (macOS: plus.rectangle.on.folder).
+                            let col = if imported {
+                                COL_SUCCESS
+                            } else if hover {
+                                COL_ACCENT
+                            } else {
+                                COL_TEXT_SECONDARY
+                            };
                             let (iw, ih) = (scale_dpi(16, dpi), scale_dpi(12, dpi));
                             let (ix, iy) = (ax + (aw - iw) / 2, ay + (ah - ih) / 2);
                             canvas.draw_rounded_rect(ix, iy, iw, ih, scale_dpi(2, dpi) as f32, 0, 0, Some((col, 1.3)));
                             let (pcx, pcy) = ((ix + iw / 2) as f32, (iy + ih / 2) as f32);
                             let arm = scale_dpi(3, dpi) as f32;
-                            canvas.draw_line(pcx - arm, pcy, pcx + arm, pcy, 1.4, col);
-                            canvas.draw_line(pcx, pcy - arm, pcx, pcy + arm, 1.4, col);
+                            if imported {
+                                // Checkmark inside the card
+                                canvas.draw_line(pcx - arm, pcy, pcx - arm * 0.2, pcy + arm * 0.8, 1.5, col);
+                                canvas.draw_line(pcx - arm * 0.2, pcy + arm * 0.8, pcx + arm * 1.1, pcy - arm * 0.8, 1.5, col);
+                            } else {
+                                // Media-pool card with a "+" (macOS: plus.rectangle.on.folder).
+                                canvas.draw_line(pcx - arm, pcy, pcx + arm, pcy, 1.4, col);
+                                canvas.draw_line(pcx, pcy - arm, pcx, pcy + arm, 1.4, col);
+                            }
                             st.hit_boxes.push(HitBox { rect: Rect { left: ax, top: ay, right: ax + aw, bottom: ay + ah }, action });
                         }
 
@@ -4347,6 +4386,7 @@ mod win_gui {
                     setup_desktop_icon: true,
                     setup_context_menu: true,
                     scrub_hover: None,
+                    resolve_imported: std::collections::HashSet::new(),
                 });
                 0
             }
