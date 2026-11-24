@@ -47,13 +47,9 @@ mounts through the NFS client that is built into macOS.
 
 ## Known limitations
 
-- **Magic Lantern `.MLV`:** Dual ISO clips, static hot/dead sensor pixels, and 8-column Canon
-  vertical stripes are automatically detected and repaired per clip (`Auto` mode); clean clips
-  with no defects keep zero-decode LJ92 passthrough.
-- **Focus pixel correction** is applied to Canon bodies with phase-detect pixels in raw video
-  (100D, 650D, 700D, EOS M, EOS M2). In `Auto` mode CineFS uses bundled Magic Lantern focus-pixel
-  maps first and falls back to learning the lattice from the clip itself for unmapped readout modes
-  (where very short or heavily textured clips may leave a few focus pixels uncorrected).
+- **Focus pixels in unmapped readout modes:** when no bundled Magic Lantern map matches, CineFS
+  learns the focus-pixel lattice from the clip itself; very short or heavily textured clips may
+  leave a few focus pixels uncorrected.
 - **Blackmagic RAW `.braw` is experimental.** Black/white levels are approximated, white balance
   is estimated from the first frame (the camera's Kelvin/tint is not used) and the sensor is
   assumed to be Blackmagic Wide Gamut Gen4/5, so colour may not match Blackmagic's own software.
@@ -72,6 +68,8 @@ import, and support for MotionCam `.mcraw` and (experimentally) Blackmagic RAW `
 - **Header / Payload Separation**: Reading DNG TIFF/EXIF headers (for OS thumbnails or NLE media scanning) never triggers pixel decoding.
 - **Zero-Decode LJ92 Passthrough**: Lossless JPEG (LJ92) frames in `.MLV` containers that match DNG's 2-component CFA predictor-1 layout are wrapped directly as `Compression = 7` DNG strips without decoding or re-encoding pixels.
 - **Zero-Unpack Native Bit Depth**: Uncompressed 8/10/12/14/16-bit `.MLV` frames are served at their native bit depth without inflating to 16-bit.
+- **Automatic `.MLV` Defect Repair**: Dual ISO clips (recovered to 16-bit linear), static hot/dead sensor pixels, and 8-column Canon vertical stripes are detected and repaired per clip in `Auto` mode; clean clips with no defects keep zero-decode LJ92 passthrough.
+- **Focus Pixel Correction**: Canon bodies with phase-detect pixels in raw video (100D, 650D, 700D, EOS M, EOS M2) are corrected using bundled Magic Lantern focus-pixel maps, with a fallback that learns the lattice from the clip itself for unmapped readout modes.
 - **Native MotionCam `.mcraw` Support**: Pure-Rust MotionCam container v3 parser and block-level bitplane decoder (`compressionType = 7` and legacy `6`), mapping dual-illuminant `ColorMatrix1/2`, `ForwardMatrix1/2`, `AsShotNeutral`, dynamic black/white levels, and audio packets directly into virtual CinemaDNG + BWF WAV.
 - **Experimental Blackmagic RAW `.braw` Support**: Independent, pure-Rust reader for `.braw` clips that decodes frames to 12-bit Bayer and serves them as virtual CinemaDNG (see [Known limitations](#known-limitations)). See [Trademarks & affiliation](#trademarks--affiliation).
 - **Broadcast WAV (BWF) Audio**: `WAVI` + `AUDF` (and `.mcraw` `AUDIO_DATA`) blocks are presented as a virtual `.wav` file with embedded `bext` and `iXML` timecode chunks so DaVinci Resolve automatically syncs audio to the CinemaDNG sequence.
